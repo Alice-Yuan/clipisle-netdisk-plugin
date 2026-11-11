@@ -140,13 +140,16 @@ class NetdiskPlugin {
     } on NetdiskException catch (e) {
       final errno =
           RegExp(r'errno=(-?[0-9]+)').firstMatch(e.detail ?? '')?.group(1);
+      final providerCode = RegExp(r'(?:^| )code=(-?[0-9]+)')
+          .firstMatch(e.detail ?? '')
+          ?.group(1);
       final shape = RegExp(
               r'(?:(?:listType|dlinkType|topDlinkType|dataType)=(?:null|string|array|object|boolean|number|other)|itemCount=[0-9]+|targetMatched=[01])(?: |$)')
           .allMatches(e.detail ?? '')
           .map((m) => m.group(0)!.trim())
           .join(' ');
       debugPrint(
-          '[Netdisk] platform=${e.platform} code=${e.code.name} http=${e.statusCode} errno=$errno stage=${RegExp(r'stage=([a-z]+)').firstMatch(e.detail ?? '')?.group(1)} $shape');
+          '[Netdisk] platform=${e.platform} code=${e.code.name} http=${e.statusCode} errno=$errno providerCode=$providerCode stage=${RegExp(r'stage=([a-z]+)').firstMatch(e.detail ?? '')?.group(1)} $shape');
       return {'ok': false, 'code': e.code.name, 'message': _error(e.code)};
     } catch (_) {
       return {'ok': false, 'message': '网盘操作失败，请重试'};
@@ -251,6 +254,8 @@ class NetdiskPlugin {
         if (input.length > 16000) {
           throw const NetdiskException(NetdiskErrorCode.badLink, '链接过长');
         }
+        final pendingSelection = _pendingSelection(v);
+        final pendingIds = pendingSelection?.toSet();
         var link = client.detect(input);
         if (link.platform == NetdiskPlatform.aliyun) {
           throw const NetdiskException(
@@ -270,7 +275,8 @@ class NetdiskPlugin {
           share = await _withDownloadIdentity(link.platform,
               (credential) => client.parseLink(link, credential: credential));
         } on NetdiskException catch (e) {
-          return _recovery(e, input, link.platform);
+          return _recovery(e, input, link.platform,
+              password: link.password, pendingSelection: pendingSelection);
         }
         final sessionId =
             '${DateTime.now().microsecondsSinceEpoch}-${_sequence++}';
@@ -282,8 +288,18 @@ class NetdiskPlugin {
             'id': 'files-$sessionId',
             'title': link.platform.label,
             'stickyActions': true,
+            'selectionControls': true,
             'fields': [
-              {'id': 'sessionId', 'type': 'hidden', 'value': sessionId}
+              {'id': 'sessionId', 'type': 'hidden', 'value': sessionId},
+              {'id': 'input', 'type': 'hidden', 'value': input},
+              if (link.password != null)
+                {'id': 'password', 'type': 'hidden', 'value': link.password},
+              if (pendingSelection != null)
+                {
+                  'id': 'pendingSelection',
+                  'type': 'hidden',
+                  'value': pendingSelection
+                },
             ],
             'items': [
               {
@@ -296,25 +312,43 @@ class NetdiskPlugin {
                   'id': file.fileId,
                   'title': file.extra['relativePath'] ?? file.name,
                   'subtitle': _bytes(file.size),
-                  'selected': true,
+                  'selected': pendingIds?.contains(file.fileId) ?? true,
                 }
             ],
             'actions': [
-              {'id': 'prepareDownloads', 'label': '开始下载', 'primary': true}
+              {
+                'id': 'prepareDownloads',
+                'label': '开始下载',
+                'primary': true,
+                'requiresSelection': true,
+                'cancelMethod': 'cancelInput'
+              }
             ],
           }
         };
       });
 
+  List<String>? _pendingSelection(Map<String, dynamic> values) =>
+      values['pendingSelection'] is List
+          ? (values['pendingSelection'] as List)
+              .whereType<String>()
+              .toSet()
+              .toList()
+          : null;
+
   Map<String, dynamic> _recovery(
-          NetdiskException e, String input, NetdiskPlatform p) =>
+          NetdiskException e, String input, NetdiskPlatform p,
+          {String? password,
+          List<String>? pendingSelection,
+          String? message,
+          bool forceLogin = false}) =>
       {
         'ok': true,
         'page': {
           'id': 'recover-${p.id}',
           'title': p.label,
           'items': [
-            {'type': 'headline', 'title': _error(e.code)}
+            {'type': 'headline', 'title': message ?? _error(e.code)}
           ],
           'fields': [
             {'id': 'input', 'type': 'hidden', 'value': input},
@@ -322,13 +356,27 @@ class NetdiskPlugin {
               NetdiskErrorCode.passwordWrong,
               NetdiskErrorCode.passwordRequired
             }.contains(e.code))
-              {'id': 'password', 'type': 'text', 'label': '提取码', 'value': ''},
+              {
+                'id': 'password',
+                'type': 'text',
+                'label': '提取码',
+                'value': password ?? ''
+              }
+            else if (password != null)
+              {'id': 'password', 'type': 'hidden', 'value': password},
+            if (pendingSelection != null)
+              {
+                'id': 'pendingSelection',
+                'type': 'hidden',
+                'value': pendingSelection
+              },
           ],
           'actions': [
-            if ({
-              NetdiskErrorCode.loginRequired,
-              NetdiskErrorCode.credentialExpired
-            }.contains(e.code))
+            if (forceLogin ||
+                {
+                  NetdiskErrorCode.loginRequired,
+                  NetdiskErrorCode.credentialExpired
+                }.contains(e.code))
               {
                 'id': p == NetdiskPlatform.baidu ? 'loginBaidu' : 'loginQuark',
                 'label': '登录',
@@ -355,8 +403,38 @@ class NetdiskPlugin {
         .toList();
     if (files.isEmpty) return {'ok': false, 'message': '请至少选择一个文件'};
     if (files.length > 500) return {'ok': false, 'message': '一次最多添加 500 个文件'};
-    // Public shares must be attempted without a mandatory account gate.
-    // The provider response determines whether sign-in or verification is needed.
+    if (session.link.platform == NetdiskPlatform.quark) {
+      final largest = files
+          .reduce((current, file) => file.size > current.size ? file : current);
+      return _operation(v, (client) async {
+        final credential = await _credential(NetdiskPlatform.quark);
+        try {
+          // Resolve only the largest selection. Never request the file body or
+          // save the returned signed URL: this is an admission check, not a transfer.
+          await client.resolveDownloadFrom(session.link, largest,
+              credential: credential);
+        } on NetdiskException catch (error) {
+          final anonymousLimit =
+              error.code == NetdiskErrorCode.sizeLimitExceeded &&
+                  !_hasLogin(NetdiskPlatform.quark, credential.cookie);
+          return _recovery(error, session.link.rawUrl, session.link.platform,
+              password: session.link.password,
+              pendingSelection: files.map((file) => file.fileId).toList(),
+              forceLogin: anonymousLimit,
+              message: anonymousLimit ? '所选文件超出夸克免登录下载限制，请登录后重试' : null);
+        }
+        if (_canceled.contains(v['requestId'])) {
+          throw const NetdiskException(NetdiskErrorCode.network, '已取消');
+        }
+        return _persistDownloads(session, files);
+      });
+    }
+    return _persistDownloads(session, files);
+  }
+
+  Future<Map<String, dynamic>> _persistDownloads(
+      ({ParsedShareLink link, NetdiskShare share}) session,
+      List<NetdiskFile> files) async {
     final downloads = <Map<String, dynamic>>[];
     for (final file in files) {
       final id = sha256

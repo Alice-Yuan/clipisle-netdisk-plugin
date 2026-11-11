@@ -387,7 +387,9 @@ void main() {
       final fields = ((result['page'] as Map)['fields'] as List).cast<Map>();
       expect(fields.singleWhere((field) => field['id'] == 'input')['value'],
           verificationUrl);
-      expect(fields.any((field) => field['id'] == 'password'),
+      expect(
+          fields.any(
+              (field) => field['id'] == 'password' && field['type'] == 'text'),
           code != NetdiskErrorCode.network);
       expect(pageActions(result).map((action) => action['id']), ['parseInput']);
       expect(
@@ -591,12 +593,12 @@ void main() {
     final resolved =
         await restored.invoke('resolveDownload', {'resourceId': id});
     expect(resolved['ok'], true);
-    expect(transports, hasLength(2));
+    expect(transports, hasLength(3));
     expect(transports.last.listedParents, ['nested-parent']);
     expect(transports.last.downloaded, true);
     expect(transports.last.closed, true);
     final result = resolved['download'] as Map;
-    expect((result['headers'] as Map)['Cookie'], contains('anonymous-2'));
+    expect((result['headers'] as Map)['Cookie'], contains('anonymous-3'));
     // Session cookies are transient headers, never part of persisted opaque resources.
     expect(resource, isNot(contains('anonymous-')));
     expect(resource, isNot(contains('device-')));
@@ -759,11 +761,19 @@ void main() {
   });
 
   test('cancellation suppresses an in-flight resolved download', () async {
+    var hold = false;
     final started = Completer<void>();
     final gate = Completer<NetdiskDownloadLink>();
     final fixture = Fixture()
       ..configure = (client) {
         client.onResolve = () {
+          if (!hold) {
+            return Future.value(const NetdiskDownloadLink(
+                platform: NetdiskPlatform.quark,
+                url: 'https://cdn.quark.cn/preflight',
+                fileName: 'sample.bin',
+                size: 8));
+          }
           started.complete();
           return gate.future;
         };
@@ -775,6 +785,7 @@ void main() {
       'selectedIds': ['file-1'],
     });
     final id = ((prepared['downloads'] as List).single as Map)['resourceId'];
+    hold = true;
     final pending = plugin.invoke('resolveDownload', {
       'resourceId': id,
       'requestId': 'cancel-resolve',
@@ -1004,9 +1015,17 @@ void main() {
 
   test('Quark verification errors do not create Baidu verification context',
       () async {
+    var fail = false;
     final fixture = Fixture()
       ..configure = (client) {
         client.onResolve = () async {
+          if (!fail) {
+            return const NetdiskDownloadLink(
+                platform: NetdiskPlatform.quark,
+                url: 'https://cdn.quark.cn/preflight',
+                fileName: 'sample.bin',
+                size: 8);
+          }
           throw const NetdiskException(
               NetdiskErrorCode.verificationRequired, 'fixture');
         };
@@ -1018,6 +1037,7 @@ void main() {
       'selectedIds': ['file-1']
     });
     final id = ((prepared['downloads'] as List).single as Map)['resourceId'];
+    fail = true;
     final result = await plugin.invoke('resolveDownload', {'resourceId': id});
     expect(result['ok'], false);
     expect(fixture.saved.containsKey('verification.baidu'), false);

@@ -2,7 +2,7 @@
 
 网盘分享目录解析、下载链接获取与 HTTP 下载。根目录是纯 Dart 库；`plugin/` 是单独安装的 ClipIsle Android 插件，支持百度网盘和夸克网盘。阿里云盘仅保留为库中的 experimental 实现。
 
-当前插件版本为 `0.1.2`。公开仓库已创建：[Alice-Yuan/clipisle-netdisk-plugin](https://github.com/Alice-Yuan/clipisle-netdisk-plugin)。安装包与插件清单见 [v0.1.2 Release](https://github.com/Alice-Yuan/clipisle-netdisk-plugin/releases/tag/v0.1.2)。
+当前插件版本为 `0.1.3`。公开仓库已创建：[Alice-Yuan/clipisle-netdisk-plugin](https://github.com/Alice-Yuan/clipisle-netdisk-plugin)。安装包与插件清单见 [v0.1.3 Release](https://github.com/Alice-Yuan/clipisle-netdisk-plugin/releases/tag/v0.1.3)。
 
 ## 安装
 
@@ -10,12 +10,14 @@
 
 **夸克已完成真实样例的手机完整下载；百度改为访客优先，但当前样例的原文件下载仍受限。** 详见 [0.1.2 对照与验收](docs/yunx-reference.md)。
 
+0.1.3 增加全选、取消全选、反选和空选禁用；夸克入队前预检，匿名受限时提供登录入口并保留勾选；修复官方登录页入口及手机显示。需同步更新 ClipIsle 宿主。详见 [大文件与选择验收](docs/quark-large-download-and-selection.md)。
+
 ## 支持范围
 
 | 平台 | 匿名列目录 | 获取原文件下载链接 | Android 插件 |
 | --- | --- | --- | --- |
 | 百度网盘 | 匿名与登录目录均已真机验证 | 访客优先，受限时仅用已有账号重试一次；真实取链仍未通过 | 已接入，下载验证待完成 |
-| 夸克网盘 | 已实现 | 已完成一个匿名样例的手机完整下载，仍需要匿名会话 Cookie | 已接入 |
+| 夸克网盘 | 已实现 | 匿名小文件、登录后 372.5 MB 文件均已真机完整下载；匿名大文件会受限 | 已接入 |
 | 阿里云盘 | 已实现，experimental | 需要阿里云盘账号 access_token，或账号 refresh_token 换取 | 未公开接入 |
 
 “匿名”指无需用户账号，不表示请求完全不需要 Cookie。有效直链、账号会员状态都不保证不限速、不保证大文件权限，也不绕过服务端风控。取链成功与完整下载成功是不同的验证层次。

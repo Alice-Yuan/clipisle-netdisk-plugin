@@ -11,6 +11,8 @@ class LoginActivity : Activity() {
  private lateinit var web: WebView
  private lateinit var status: TextView
  private var platform=""
+ private lateinit var progress: ProgressBar
+ private lateinit var retry: Button
 
  private fun capture(save: Boolean = false): Boolean {
   val host=if(platform=="baidu") "https://pan.baidu.com/" else "https://pan.quark.cn/"
@@ -38,23 +40,53 @@ class LoginActivity : Activity() {
   web.settings.useWideViewPort=true; web.settings.loadWithOverviewMode=true
   web.settings.builtInZoomControls=true; web.settings.displayZoomControls=false
   web.settings.javaScriptEnabled=true; web.settings.domStorageEnabled=true
-  web.settings.userAgentString="Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+  web.settings.userAgentString=if(platform=="quark")
+   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+   else "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+  if(platform=="quark") {
+   val widthDp=resources.displayMetrics.widthPixels/resources.displayMetrics.density
+   web.setInitialScale((100*widthDp/1280f).toInt().coerceIn(20,100))
+  }
+  progress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply { max=100 }
+  root.addView(progress,LinearLayout.LayoutParams(-1,6))
+  retry=Button(this).apply {
+   text=nativeText("页面加载失败，点击重试","Page failed to load. Retry","読み込めませんでした・再試行","페이지 로드 실패 · 다시 시도")
+   visibility=android.view.View.GONE
+   setOnClickListener { visibility=android.view.View.GONE; web.reload() }
+  }
+  root.addView(retry)
+  web.webChromeClient=object:WebChromeClient() {
+   override fun onProgressChanged(v:WebView,value:Int) { progress.progress=value; progress.visibility=if(value<100) android.view.View.VISIBLE else android.view.View.GONE }
+  }
   web.settings.allowFileAccess=false; web.settings.allowContentAccess=false
   web.settings.mixedContentMode=WebSettings.MIXED_CONTENT_NEVER_ALLOW
   CookieManager.getInstance().setAcceptCookie(true)
   CookieManager.getInstance().setAcceptThirdPartyCookies(web,false)
   web.webViewClient=object: WebViewClient() {
+   override fun onPageStarted(v:WebView,url:String,icon:android.graphics.Bitmap?) { retry.visibility=android.view.View.GONE; progress.visibility=android.view.View.VISIBLE }
+   override fun onReceivedError(v:WebView,request:WebResourceRequest,error:WebResourceError) {
+    if(request.isForMainFrame) { retry.visibility=android.view.View.VISIBLE; progress.visibility=android.view.View.GONE }
+   }
+   override fun onReceivedHttpError(v:WebView,request:WebResourceRequest,response:WebResourceResponse) {
+    if(request.isForMainFrame && response.statusCode>=400) { retry.visibility=android.view.View.VISIBLE; progress.visibility=android.view.View.GONE }
+   }
    override fun shouldOverrideUrlLoading(v:WebView,request:WebResourceRequest):Boolean {
     val u=request.url; val h=u.host ?: return true
     val roots=if(platform=="baidu") listOf("baidu.com") else listOf("quark.cn","uc.cn")
     return u.scheme!="https" || roots.none { h==it || h.endsWith(".$it") }
    }
-   override fun onPageFinished(v:WebView,url:String) { try { if(capture()) status.text=nativeText("已登录，点击完成","Signed in. Tap Done","ログイン済み・完了を押す","로그인됨 · 완료를 누르세요") } catch (_:Exception) {} }
+   override fun onPageFinished(v:WebView,url:String) { try {
+    if(platform=="quark") {
+     val manager=CookieManager.getInstance()
+     fun hasLogin(origin:String)=(manager.getCookie(origin) ?: "").split(';').any { it.trim().startsWith("__puus=") && it.substringAfter('=').isNotBlank() }
+     android.util.Log.i("NetdiskLogin","quark pageFinished panLogin=${hasLogin("https://pan.quark.cn/")} apiLogin=${hasLogin("https://drive-pc.quark.cn/")}")
+    }
+    if(capture()) status.text=nativeText("已登录，点击完成","Signed in. Tap Done","ログイン済み・完了を押す","로그인됨 · 완료를 누르세요") } catch (_:Exception) {} }
   }
   root.addView(web,LinearLayout.LayoutParams(-1,0,1f)); setContentView(root)
   val requested=intent.getStringExtra("url")?.let { Uri.parse(it) }
   val share = requested?.takeIf { platform=="baidu" && it.scheme=="https" && it.host=="pan.baidu.com" && it.userInfo==null && it.port == -1 && (it.path?.startsWith("/s/")==true || it.path=="/share/init") }
-  web.loadUrl(share?.toString() ?: if(platform=="baidu") "https://pan.baidu.com/disk/main#/index" else "https://pan.quark.cn/")
+  web.loadUrl(share?.toString() ?: if(platform=="baidu") "https://pan.baidu.com/disk/main#/index" else "https://pan.quark.cn/?fr=pc&platform=pc")
  }
  private fun complete() { try {
   if(!capture(true)) { Toast.makeText(this,nativeText("请先完成网页登录","Complete sign-in first","先にログインしてください","먼저 로그인하세요"),Toast.LENGTH_SHORT).show(); return }
