@@ -1,12 +1,12 @@
-# netdisk-direct
+# ClipIsle Netdisk Plugin
 
 网盘分享目录解析、下载链接获取与 HTTP 下载。根目录是纯 Dart 库；`plugin/` 是单独安装的 ClipIsle Android 插件，支持百度网盘和夸克网盘。阿里云盘仅保留为库中的 experimental 实现。
 
-当前源码版本为 `0.1.0`。公开仓库已创建：[Alice-Yuan/netdisk-direct](https://github.com/Alice-Yuan/netdisk-direct)。安装包与插件清单见 [v0.1.0 Release](https://github.com/Alice-Yuan/netdisk-direct/releases/tag/v0.1.0)。
+当前插件版本为 `0.1.1`。公开仓库已创建：[Alice-Yuan/clipisle-netdisk-plugin](https://github.com/Alice-Yuan/clipisle-netdisk-plugin)。安装包与插件清单见 [v0.1.1 Release](https://github.com/Alice-Yuan/clipisle-netdisk-plugin/releases/tag/v0.1.1)。
 
 ## 安装
 
-更新 ClipIsle 宿主后，在「插件 → 从 GitHub 添加」输入 `Alice-Yuan/netdisk-direct`，确认安装与首次授权。插件设置中管理账号；粘贴分享文本后选择文件，任务直接进入宿主下载队列。
+更新 ClipIsle 宿主后，在「插件 → 从 GitHub 添加」输入 `Alice-Yuan/clipisle-netdisk-plugin`，确认安装与首次授权。插件设置中管理账号；粘贴分享文本后选择文件，任务直接进入宿主下载队列。
 
 **当前夸克已完成一个真实样例的完整下载；百度仅登录与目录解析验收通过，取原文件仍受限。**
 
@@ -29,7 +29,7 @@
 ```yaml
 dependencies:
   netdisk_direct:
-    path: ../netdisk-direct
+    path: ../clipisle-netdisk-plugin
 ```
 
 ```dart

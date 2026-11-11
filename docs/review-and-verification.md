@@ -1,6 +1,6 @@
 # 审查与验证记录
 
-记录日期：2026-11-11。公开仓库 [Alice-Yuan/netdisk-direct](https://github.com/Alice-Yuan/netdisk-direct) 已创建。版本 v0.1.0，安装包与插件清单见 [Release](https://github.com/Alice-Yuan/netdisk-direct/releases/tag/v0.1.0)。
+记录日期：2026-11-11。公开仓库 [Alice-Yuan/clipisle-netdisk-plugin](https://github.com/Alice-Yuan/clipisle-netdisk-plugin) 已创建。版本 v0.1.1，安装包与插件清单见 [Release](https://github.com/Alice-Yuan/clipisle-netdisk-plugin/releases/tag/v0.1.1)。
 
 本文只记录可公开的技术结论。真实分享 URL、提取码、文件名、Cookie、账号 token 和下载签名没有写入本文或测试 fixture。
 
@@ -98,4 +98,8 @@ Windows 环境中，真实 Dart probe 显式注入使用 `HttpClient.findProxyFr
 
 ## 发布核验
 
-v0.1.0 已公开发布一个独立签名 APK 和 `clipisle-plugin.json`。GitHub API 的资产 SHA-256 与本地签名包一致。手机当前网络从 GitHub 读取 Release 超时，桌面匿名 API 也遇到限流；本轮通过 ADB 安装同一产物完成真机验收，不将 GitHub 端到端安装记为通过。这与百度取链的 9019 是不同链路的问题。
+v0.1.1 已公开发布一个独立签名 APK 和 `clipisle-plugin.json`。GitHub API 的资产 SHA-256 与本地签名包一致。手机当前网络从 GitHub 读取 Release 超时，桌面匿名 API 也遇到限流；本轮通过 ADB 安装同一产物完成真机验收，不将 GitHub 端到端安装记为通过。这与百度取链的 9019 是不同链路的问题。
+
+## 仓库命名统一
+
+插件仓库采用 `clipisle-<能力>-plugin`，本仓库为 `clipisle-netdisk-plugin`，与 `clipisle-bt-plugin` 一致。0.1.1 更新宿主安装入口、编译后插件来源及 Release 清单，继续使用原插件 ID、包名和签名。下载实现和此前百度验收限制不变。

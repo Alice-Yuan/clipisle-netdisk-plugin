@@ -2,7 +2,7 @@
 
 独立安装的 Android APK，通过 Service/Messenger 与 ClipIsle 通信，使用父目录的纯 Dart 解析库。插件提供百度网盘和夸克网盘输入、账号和文件选择；阿里云盘只保留在库中实验，不在插件公开。
 
-公开仓库已创建：[Alice-Yuan/netdisk-direct](https://github.com/Alice-Yuan/netdisk-direct)。当前源码版本为 0.1.0，安装包与插件清单见 [v0.1.0 Release](https://github.com/Alice-Yuan/netdisk-direct/releases/tag/v0.1.0)。
+公开仓库已创建：[Alice-Yuan/clipisle-netdisk-plugin](https://github.com/Alice-Yuan/clipisle-netdisk-plugin)。当前源码版本为 0.1.1，安装包与插件清单见 [v0.1.1 Release](https://github.com/Alice-Yuan/clipisle-netdisk-plugin/releases/tag/v0.1.1)。
 
 ## 宿主要求与下载流程
 
