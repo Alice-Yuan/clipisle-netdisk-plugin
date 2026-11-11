@@ -95,3 +95,7 @@ Windows 环境中，真实 Dart probe 显式注入使用 `HttpClient.findProxyFr
 - [AList 阿里分享驱动 util.go](https://github.com/AlistGo/alist/blob/main/drivers/aliyundrive_share/util.go)：核对账号刷新、x-share-token 与 marker 分页。
 
 这些是第三方实现的主来源，不是网盘官方服务承诺。本轮仅交叉核对接口行为，未复制上游实现；本仓库 MIT 许可证不改变上游许可。
+
+## 发布核验
+
+v0.1.0 已公开发布一个独立签名 APK 和 `clipisle-plugin.json`。GitHub API 的资产 SHA-256 与本地签名包一致。手机当前网络从 GitHub 读取 Release 超时，桌面匿名 API 也遇到限流；本轮通过 ADB 安装同一产物完成真机验收，不将 GitHub 端到端安装记为通过。这与百度取链的 9019 是不同链路的问题。
