@@ -1,25 +1,29 @@
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dart-lang/setup-dart@v1
+      - uses: subosito/flutter-action@v2
         with:
-          sdk: stable
-
+          flutter-version: 3.44.4
+          channel: stable
+          cache: true
       - run: dart pub get
-
-      - name: 静态分析
-        run: dart analyze
-
-      - name: 单元测试
-        run: dart test --reporter expanded
+      - run: dart analyze lib bin test tool
+      - run: dart test
+      - run: flutter pub get
+        working-directory: plugin
+      - run: flutter analyze
+        working-directory: plugin
+      - run: flutter test
+        working-directory: plugin
+      - run: flutter build apk --debug --target-platform android-arm64
+        working-directory: plugin

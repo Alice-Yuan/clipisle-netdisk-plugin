@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ <uses-permission android:name="android.permission.INTERNET"/>
+ <queries><package android:name="com.clipisle.app"/></queries>
+ <application android:label="ClipIsle 网盘" android:icon="@drawable/netdisk_icon" android:allowBackup="false" android:usesCleartextTraffic="false">
+  <meta-data android:name="flutterEmbedding" android:value="2"/>
+  <activity android:name="com.clipisle.netdiskplugin.PluginAccessActivity" android:exported="true" android:theme="@style/ActivationTheme">
+   <intent-filter><action android:name="com.clipisle.plugin.NETDISK_AUTHORIZE"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
+  </activity>
+  <activity android:name="com.clipisle.netdiskplugin.LoginActivity" android:exported="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:configChanges="orientation|screenSize|keyboardHidden">
+   <intent-filter><action android:name="com.clipisle.plugin.NETDISK_LOGIN"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
+  </activity>
+  <service android:name="com.clipisle.netdiskplugin.PluginService" android:exported="true">
+   <intent-filter><action android:name="com.clipisle.plugin.BIND"/></intent-filter>
+   <meta-data android:name="com.clipisle.plugin.manifest" android:resource="@string/plugin_manifest"/>
+  </service>
+ </application>
+</manifest>

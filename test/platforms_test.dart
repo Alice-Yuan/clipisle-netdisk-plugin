@@ -85,7 +85,8 @@ void main() {
     });
 
     test('百度 surl 形式', () {
-      final link = client.detect('https://pan.baidu.com/share/init?surl=xYz789');
+      final link =
+          client.detect('https://pan.baidu.com/share/init?surl=xYz789');
       expect(link.platform, NetdiskPlatform.baidu);
       expect(link.shareId, 'xYz789');
     });
@@ -223,7 +224,12 @@ void main() {
             'code': 0,
             'data': {
               'list': [
-                {'fid': 'f1', 'file_name': 'big.zip', 'size': 99999999, 'dir': false},
+                {
+                  'fid': 'f1',
+                  'file_name': 'big.zip',
+                  'size': 99999999,
+                  'dir': false
+                },
               ],
             },
           }),
@@ -256,32 +262,31 @@ void main() {
             'data': {'stoken': 'S'},
           }),
         ),
-        'GET /1/clouddrive/share/sharepage/detail':
-            (int hit) => FakeResponse(
-                  200,
-                  jsonEncode({
-                    'code': 0,
-                    'data': {
-                      'list': hit == 1
-                          ? [
-                              {
-                                'fid': 'dir1',
-                                'file_name': '子目录',
-                                'size': 0,
-                                'dir': true,
-                              },
-                            ]
-                          : [
-                              {
-                                'fid': 'file1',
-                                'file_name': 'inner.mp4',
-                                'size': 2048,
-                                'dir': false,
-                              },
-                            ],
-                    },
-                  }),
-                ),
+        'GET /1/clouddrive/share/sharepage/detail': (int hit) => FakeResponse(
+              200,
+              jsonEncode({
+                'code': 0,
+                'data': {
+                  'list': hit == 1
+                      ? [
+                          {
+                            'fid': 'dir1',
+                            'file_name': '子目录',
+                            'size': 0,
+                            'dir': true,
+                          },
+                        ]
+                      : [
+                          {
+                            'fid': 'file1',
+                            'file_name': 'inner.mp4',
+                            'size': 2048,
+                            'dir': false,
+                          },
+                        ],
+                },
+              }),
+            ),
       });
       final client = clientFor(server);
       final share = await client.parse('https://pan.quark.cn/s/nested');
@@ -316,7 +321,7 @@ void main() {
             ],
           }),
         ),
-        'POST /adrive/v2/file/get_share_link_download_url': FakeResponse(
+        'POST /v2/file/get_share_link_download_url': FakeResponse(
           200,
           jsonEncode({
             'urls': ['https://cdn.alipan.com/photo.jpg?sig=1'],
@@ -325,18 +330,21 @@ void main() {
       });
 
       final client = clientFor(server);
-      final share = await client.parse('https://www.alipan.com/s/shareXYZ 提取码: 1234');
+      final share =
+          await client.parse('https://www.alipan.com/s/shareXYZ 提取码: 1234');
       expect(share.platform, NetdiskPlatform.aliyun);
       expect(share.files.single.name, '照片.jpg');
       expect(share.title, '我的分享');
       expect(share.ownerName, '张三');
 
-      final link = await client.resolveDownload(share, share.files.single);
+      final link = await client.resolveDownload(share, share.files.single,
+          credential: const NetdiskCredential(accessToken: 'fixture-access'));
       expect(link.url, contains('cdn.alipan.com'));
       expect(link.headers['Referer'], 'https://www.alipan.com/');
 
       // list 与 download_url 都必须带 x-share-token
-      for (final post in server.posts.where((p) => !p.url.path.contains('share_token'))) {
+      for (final post
+          in server.posts.where((p) => !p.url.path.contains('share_token'))) {
         expect(post.headers['x-share-token'], 'ST_123');
       }
       // 分享 token 请求必须带提取码
@@ -359,13 +367,13 @@ void main() {
             ],
           }),
         ),
-        'POST /adrive/v2/file/get_share_link_download_url':
-            FakeResponse(410, ''),
+        'POST /v2/file/get_share_link_download_url': FakeResponse(410, ''),
       });
       final client = clientFor(server);
       final share = await client.parse('https://www.alipan.com/s/x');
       await expectLater(
-        client.resolveDownload(share, share.files.single),
+        client.resolveDownload(share, share.files.single,
+            credential: const NetdiskCredential(accessToken: 'fixture-access')),
         throwsA(
           isA<NetdiskException>().having(
             (e) => e.code,
@@ -401,18 +409,31 @@ void main() {
   });
 
   group('百度网盘', () {
-    test('无 Cookie 直接抛 loginRequired，不浪费请求', () async {
-      final server = FakeServer({});
+    test('无 Cookie 仍可匿名列目录', () async {
+      final server = FakeServer({
+        'POST /share/wxlist': FakeResponse(
+            200,
+            jsonEncode({
+              'errno': 0,
+              'data': {
+                'shareid': 1,
+                'uk': 2,
+                'has_more': false,
+                'list': [
+                  {
+                    'fs_id': 1,
+                    'server_filename': 'sample.bin',
+                    'size': 8,
+                    'isdir': 0
+                  },
+                ]
+              },
+            })),
+      });
       final client = clientFor(server);
-      await expectLater(
-        client.parse('https://pan.baidu.com/s/1abc'),
-        throwsA(
-          isA<NetdiskException>()
-              .having((e) => e.code, 'code', NetdiskErrorCode.loginRequired)
-              .having((e) => e.message, 'message', contains('BDUSS')),
-        ),
-      );
-      expect(server.requests, isEmpty);
+      final share = await client.parse('https://pan.baidu.com/s/1abc');
+      expect(share.files.single.name, 'sample.bin');
+      expect(server.requests, hasLength(1));
     });
 
     test('带 Cookie 时走 init -> page -> list', () async {
@@ -448,11 +469,12 @@ void main() {
       expect(share.files.single.name, '文档.pdf');
       expect(share.files.single.size, 8192);
       // cookie 必须进请求头
-      final initReq = server.requests.firstWhere((r) => r.url.path == '/share/init');
+      final initReq =
+          server.requests.firstWhere((r) => r.url.path == '/share/init');
       expect(initReq.headers['Cookie'], contains('BDUSS=xxx'));
     });
 
-    test('errno -6 映射成 loginRequired', () async {
+    test('无效 Cookie 的 errno -6 映射成 credentialExpired', () async {
       const yunData = '{"shareid":1,"share_uk":"2","sign":"s","timestamp":1}';
       final server = FakeServer({
         'GET /share/init': FakeResponse(200, '{}'),
@@ -472,8 +494,8 @@ void main() {
           credential: const NetdiskCredential(cookie: 'BDUSS=bad'),
         ),
         throwsA(
-          isA<NetdiskException>()
-              .having((e) => e.code, 'code', NetdiskErrorCode.loginRequired),
+          isA<NetdiskException>().having(
+              (e) => e.code, 'code', NetdiskErrorCode.credentialExpired),
         ),
       );
     });
@@ -506,10 +528,12 @@ void main() {
         'https://pan.baidu.com/s/1abc 提取码: 9z9z',
         credential: const NetdiskCredential(cookie: 'BDUSS=b'),
       );
-      final verify = server.posts.firstWhere((p) => p.url.path == '/share/verify');
+      final verify =
+          server.posts.firstWhere((p) => p.url.path == '/share/verify');
       expect(verify.body, contains('pwd=9z9z'));
       // 后续 list 请求必须带上服务端下发的 BDCLND
-      final listReq = server.requests.firstWhere((r) => r.url.path == '/share/list');
+      final listReq =
+          server.requests.firstWhere((r) => r.url.path == '/share/list');
       expect(listReq.headers['Cookie'], contains('BDCLND=RANDSK123'));
     });
 
@@ -571,9 +595,11 @@ void main() {
       final client = clientFor(server);
       final link = client.detect('https://pan.quark.cn/s/p');
       final share = await client.parseLink(link);
-      final results = await client.resolveAll(link, share.files, concurrency: 2);
+      final results =
+          await client.resolveAll(link, share.files, concurrency: 2);
       expect(results, hasLength(3));
-      expect(results.map((r) => r.file.name).toList(), ['a.mp4', 'b.mp4', 'c.mp4']);
+      expect(results.map((r) => r.file.name).toList(),
+          ['a.mp4', 'b.mp4', 'c.mp4']);
       expect(results.every((r) => r.link != null), isTrue);
     });
   });

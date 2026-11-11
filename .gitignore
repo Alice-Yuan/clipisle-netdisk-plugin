@@ -17,3 +17,13 @@ downloads/
 # 系统
 .DS_Store
 Thumbs.db
+
+**/key.properties
+**/keys/
+**/*.jks
+**/*.keystore
+**/local.properties
+**/.dart_tool/
+**/build/
+**/.gradle/
+*.part.lock

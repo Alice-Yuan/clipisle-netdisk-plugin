@@ -45,6 +45,9 @@ enum NetdiskErrorCode {
   /// 需要登录凭证才能继续（Cookie / refresh_token）
   loginRequired,
 
+  /// 已提供登录凭据，但服务端仍要求官方账号或访问验证
+  verificationRequired,
+
   /// 凭证已失效
   credentialExpired,
 

@@ -91,14 +91,18 @@ class HttpClient {
     Object? body,
     Map<String, String>? headers,
   }) =>
-      _send('POST', url, body: jsonEncode(body ?? const {}), json: true, headers: headers);
+      _send('POST', url,
+          body: jsonEncode(body ?? const {}), json: true, headers: headers);
 
   Future<HttpResult> postForm(
     Uri url, {
     required Map<String, String> fields,
     Map<String, String>? headers,
   }) =>
-      _send('POST', url, body: Uri(queryParameters: fields).query, json: false, headers: headers);
+      _send('POST', url,
+          body: Uri(queryParameters: fields).query,
+          json: false,
+          headers: headers);
 
   Future<HttpResult> _send(
     String method,
@@ -107,43 +111,117 @@ class HttpClient {
     bool json = false,
     Map<String, String>? headers,
   }) async {
-    final request = http.Request(method, url);
-    request.headers['User-Agent'] = defaultUserAgent;
-    if (json) {
-      request.headers['Content-Type'] = 'application/json;charset=UTF-8';
-    } else if (body != null) {
-      request.headers['Content-Type'] = 'application/x-www-form-urlencoded;charset=UTF-8';
-    }
-    if (headers != null) request.headers.addAll(headers);
-    if (body != null) request.body = body;
-
+    final abort = Completer<void>();
     final stopwatch = Stopwatch()..start();
+    StreamIterator<List<int>>? bodyIterator;
+    void cancel() {
+      if (!abort.isCompleted) abort.complete();
+      final iterator = bodyIterator;
+      if (iterator != null) {
+        unawaited(iterator.cancel().catchError((Object _) {}));
+      }
+    }
+
+    Future<HttpResult> perform() async {
+      var target = url;
+      for (var redirects = 0;; redirects++) {
+        if (stopwatch.elapsed >= timeout) {
+          throw const NetdiskException(
+              NetdiskErrorCode.network, '网络请求失败或超时，请重试');
+        }
+        final request =
+            http.AbortableRequest(method, target, abortTrigger: abort.future)
+              ..followRedirects = false;
+        request.headers['User-Agent'] = defaultUserAgent;
+        if (json) {
+          request.headers['Content-Type'] = 'application/json;charset=UTF-8';
+        } else if (body != null) {
+          request.headers['Content-Type'] =
+              'application/x-www-form-urlencoded;charset=UTF-8';
+        }
+        if (headers != null) request.headers.addAll(headers);
+        if (body != null) request.body = body!;
+        final response = await _client.send(request);
+        if (abort.isCompleted || stopwatch.elapsed >= timeout) {
+          await response.stream.listen(null).cancel();
+          throw const NetdiskException(
+              NetdiskErrorCode.network, '网络请求失败或超时，请重试');
+        }
+        final location = response.headers['location'];
+        if (location != null &&
+            {301, 302, 303, 307, 308}.contains(response.statusCode)) {
+          final next = target.resolve(location);
+          // Keep all credentials on the original HTTPS origin, without URL userinfo.
+          if (next.scheme == 'https' &&
+              next.origin == target.origin &&
+              next.userInfo.isEmpty) {
+            await response.stream.listen(null).cancel();
+            if (redirects >= 3) {
+              throw const NetdiskException(
+                  NetdiskErrorCode.badResponse, '接口重定向次数过多');
+            }
+            if (response.statusCode == 303 ||
+                ((response.statusCode == 301 || response.statusCode == 302) &&
+                    method == 'POST')) {
+              method = 'GET';
+              body = null;
+              json = false;
+            }
+            target = next;
+            continue;
+          }
+        }
+        const maxBytes = 8 * 1024 * 1024;
+        if ((response.contentLength ?? 0) > maxBytes) {
+          await response.stream.listen(null).cancel();
+          throw const NetdiskException(
+              NetdiskErrorCode.badResponse, '接口响应超过大小限制');
+        }
+        final bytes = <int>[];
+        final iterator = bodyIterator = StreamIterator(response.stream);
+        try {
+          while (await iterator.moveNext()) {
+            if (stopwatch.elapsed >= timeout) {
+              throw const NetdiskException(
+                  NetdiskErrorCode.network, '网络请求失败或超时，请重试');
+            }
+            final chunk = iterator.current;
+            if (bytes.length + chunk.length > maxBytes) {
+              throw const NetdiskException(
+                  NetdiskErrorCode.badResponse, '接口响应超过大小限制');
+            }
+            bytes.addAll(chunk);
+          }
+        } finally {
+          await iterator.cancel();
+          bodyIterator = null;
+        }
+        return HttpResult(
+            status: response.statusCode,
+            bodyBytes: bytes,
+            headers: {
+              for (final e in response.headers.entries)
+                e.key.toLowerCase(): e.value
+            },
+            url: target,
+            elapsed: stopwatch.elapsed);
+      }
+    }
+
     try {
-      final streamed = await _client.send(request).timeout(timeout);
-      final bytes = await streamed.stream.toBytes().timeout(timeout);
+      // One deadline covers redirects, headers and the entire body. The abort
+      // trigger closes supported transports; timeout also bounds custom clients.
+      return await perform().timeout(timeout, onTimeout: () {
+        cancel();
+        throw const NetdiskException(NetdiskErrorCode.network, '网络请求失败或超时，请重试');
+      });
+    } on NetdiskException {
+      rethrow;
+    } catch (_) {
+      throw const NetdiskException(NetdiskErrorCode.network, '网络请求失败或超时，请重试');
+    } finally {
       stopwatch.stop();
-      return HttpResult(
-        status: streamed.statusCode,
-        bodyBytes: bytes,
-        headers: {
-          for (final e in streamed.headers.entries) e.key.toLowerCase(): e.value,
-        },
-        url: url,
-        elapsed: stopwatch.elapsed,
-      );
-    } on TimeoutException {
-      throw NetdiskException(
-        NetdiskErrorCode.network,
-        '请求超时（${timeout.inSeconds}s）',
-        detail: url.toString(),
-      );
-    } catch (e) {
-      if (e is NetdiskException) rethrow;
-      throw NetdiskException(
-        NetdiskErrorCode.network,
-        '网络请求失败：$e',
-        detail: url.toString(),
-      );
+      cancel();
     }
   }
 }

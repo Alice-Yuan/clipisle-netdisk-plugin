@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
+
 import 'package:netdisk_direct/netdisk_direct.dart';
 
 /// 命令行入口。
@@ -22,18 +24,30 @@ Future<void> main(List<String> args) async {
 
   final command = args.first;
   final rest = args.sublist(1);
-  final options = _Options.parse(rest);
-  if (options.positional.isEmpty) {
-    stderr.writeln('缺少链接参数');
+  late final _Options options;
+  try {
+    options = _Options.parse(rest);
+  } on FormatException catch (e) {
+    stderr.writeln(e.message);
+    exitCode = 64;
+    return;
+  }
+  if (options.positional.length != 1) {
+    stderr.writeln('必须提供一个链接参数');
     _usage();
     exit(64);
   }
 
   final input = options.positional.first;
+  if (!['info', 'links', 'get'].contains(command)) {
+    stderr.writeln('未知命令：$command');
+    _usage();
+    exitCode = 64;
+    return;
+  }
   final client = NetdiskClient();
-  final credential = _credentialFromEnv();
-
   try {
+    final credential = credentialFor(client.detect(input).platform);
     switch (command) {
       case 'info':
         final link = client.detect(input);
@@ -56,7 +70,10 @@ Future<void> main(List<String> args) async {
             stdout.writeln('    ${dl.url}');
             if (dl.headers.isNotEmpty) {
               final headerText = dl.headers.entries
-                  .map((e) => '-H "${e.key}: ${e.value}"')
+                  .map((e) => ['cookie', 'authorization', 'proxy-authorization']
+                          .contains(e.key.toLowerCase())
+                      ? '${e.key}: （已隐藏）'
+                      : '${e.key}: ${e.value}')
                   .join(' ');
               stdout.writeln('    需要请求头：$headerText');
             }
@@ -73,7 +90,10 @@ Future<void> main(List<String> args) async {
     }
   } on NetdiskException catch (e) {
     stderr.writeln('错误：$e');
-    exit(1);
+    exitCode = 1;
+  } on IOException catch (e) {
+    stderr.writeln('文件或网络操作失败：$e');
+    exitCode = 1;
   } finally {
     client.close();
   }
@@ -91,52 +111,50 @@ Future<void> _downloadAll(
   await outDir.create(recursive: true);
 
   final downloader = Downloader();
+  final usedNames = <String>{};
   var index = 0;
-  for (final file in share.downloadableFiles) {
-    index++;
-    stdout.writeln('[$index/${share.downloadableFiles.length}] ${file.name}');
-    final dl = await client.resolveDownloadFrom(link, file, credential: credential);
-    final safeName = _safeName(dl.fileName);
-    final target = '${outDir.path}${Platform.pathSeparator}$safeName';
+  try {
+    for (final file in share.downloadableFiles) {
+      index++;
+      stdout.writeln('[$index/${share.downloadableFiles.length}] ${file.name}');
+      final dl =
+          await client.resolveDownloadFrom(link, file, credential: credential);
+      final target = await allocateDownloadPath(outDir, dl.fileName, usedNames);
 
-    var lastLine = 0;
-    final result = await downloader.download(
-      dl,
-      targetPath: target,
-      onRefreshLink: () => client.resolveDownloadFrom(
-        link,
-        file,
-        credential: credential,
-      ),
-      onProgress: (p) {
-        final now = DateTime.now().millisecondsSinceEpoch;
-        if (now - lastLine < 500 && p.state != DownloadState.completed) return;
-        lastLine = now;
-        final pct = p.hasTotal ? (p.fraction * 100).toStringAsFixed(1) : '??';
-        final speed = _speed(p.speedBytesPerSec);
-        final eta = p.eta == null ? '--' : _duration(p.eta!);
-        stdout.write(
-          '\r  $pct%  ${_bytes(p.received)}/${p.hasTotal ? _bytes(p.total) : "?"}'
-          '  $speed  ETA $eta   ',
-        );
-      },
-    );
-    stdout.writeln();
-    if (result.isCompleted) {
-      stdout.writeln('  完成 -> ${result.path} (${_bytes(result.bytes)})');
-    } else {
-      stderr.writeln('  未完成：${result.state.name}');
+      var lastLine = 0;
+      final result = await downloader.download(
+        dl,
+        targetPath: target,
+        onRefreshLink: () => client.resolveDownloadFrom(
+          link,
+          file,
+          credential: credential,
+        ),
+        onProgress: (p) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (now - lastLine < 500 && p.state != DownloadState.completed) {
+            return;
+          }
+          lastLine = now;
+          final pct = p.hasTotal ? (p.fraction * 100).toStringAsFixed(1) : '??';
+          final speed = _speed(p.speedBytesPerSec);
+          final eta = p.eta == null ? '--' : _duration(p.eta!);
+          stdout.write(
+            '\r  $pct%  ${_bytes(p.received)}/${p.hasTotal ? _bytes(p.total) : "?"}'
+            '  $speed  ETA $eta   ',
+          );
+        },
+      );
+      stdout.writeln();
+      if (result.isCompleted) {
+        stdout.writeln('  完成 -> ${result.path} (${_bytes(result.bytes)})');
+      } else {
+        stderr.writeln('  未完成：${result.state.name}');
+      }
     }
+  } finally {
+    downloader.close();
   }
-  downloader.close();
-}
-
-NetdiskCredential _credentialFromEnv() {
-  return NetdiskCredential(
-    cookie: Platform.environment['NETDISK_BAIDU_COOKIE'] ??
-        Platform.environment['NETDISK_QUARK_COOKIE'],
-    refreshToken: Platform.environment['NETDISK_ALIYUN_REFRESH'],
-  );
 }
 
 /// 每个平台独立的 Cookie 需要分开取，这里给调用方留一个显式入口。
@@ -196,15 +214,53 @@ void _usage() {
 ''');
 }
 
-String _safeName(String name) {
-  var out = name;
-  for (final ch in ['/', r'\', ':', '*', '?', '"', '<', '>', '|']) {
-    out = out.replaceAll(ch, '_');
+/// 远端文件名只作为单个目录项使用，并遵守 Windows 文件名限制。
+String safeDownloadName(String name) {
+  var result =
+      name.replaceAll(RegExp(r'[\x00-\x1f\x7f/\\:*?"<>|]'), '_').trim();
+  result = String.fromCharCodes(result.runes.take(120));
+  result = result.replaceAll(RegExp(r'[. ]+$'), '');
+  if (result.isEmpty || result == '.' || result == '..') result = 'unnamed';
+  if (RegExp(
+          r'^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$)(?:\.|$)',
+          caseSensitive: false)
+      .hasMatch(result)) {
+    result = '_$result';
   }
-  out = out.trim();
-  if (out.isEmpty) out = 'unnamed';
-  if (out.length > 120) out = out.substring(0, 120);
-  return out;
+  return result;
+}
+
+/// 同名文件、目录和辅助文件冲突时分配后缀；不会覆盖磁盘中的最终文件。
+Future<String> allocateDownloadPath(
+    Directory directory, String name, Set<String> used) async {
+  final root = await directory.resolveSymbolicLinks();
+  final safe = safeDownloadName(name);
+  final extension = p.extension(safe);
+  final stem = p.basenameWithoutExtension(safe);
+  final entries = <String, FileSystemEntityType>{};
+  await for (final entry in Directory(root).list(followLinks: false)) {
+    entries[p.basename(entry.path).toLowerCase()] =
+        await FileSystemEntity.type(entry.path, followLinks: false);
+  }
+  for (var number = 1;; number++) {
+    final candidate = number == 1 ? safe : '$stem ($number)$extension';
+    final names = [
+      candidate,
+      '$candidate.part',
+      '$candidate.part.meta',
+      '$candidate.part.lock'
+    ];
+    if (names.any((value) => used.contains(value.toLowerCase()))) continue;
+    if (entries.containsKey(candidate.toLowerCase())) continue;
+    if (names.skip(1).any((value) {
+      final type = entries[value.toLowerCase()];
+      return type != null && type != FileSystemEntityType.file;
+    })) {
+      continue;
+    }
+    used.addAll(names.map((value) => value.toLowerCase()));
+    return p.join(root, candidate);
+  }
 }
 
 String _bytes(int n) {
@@ -245,12 +301,20 @@ class _Options {
     for (var i = 0; i < args.length; i++) {
       final arg = args[i];
       if (arg == '-o' || arg == '--output') {
-        if (i + 1 < args.length) output = args[++i];
+        if (i + 1 >= args.length || args[i + 1].startsWith('-')) {
+          throw const FormatException('输出目录参数缺少值');
+        }
+        output = args[++i];
       } else if (arg.startsWith('--output=')) {
         output = arg.substring('--output='.length);
+      } else if (arg.startsWith('-')) {
+        throw FormatException('未知选项：$arg');
       } else {
         positional.add(arg);
       }
+    }
+    if (output != null && output.trim().isEmpty) {
+      throw const FormatException('输出目录不能为空');
     }
     return _Options(positional: positional, output: output);
   }

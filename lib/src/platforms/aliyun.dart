@@ -6,23 +6,20 @@ import 'parser.dart';
 
 /// 阿里云盘。
 ///
-/// 接口链（全部实测可达，路由已逐个枚举确认）：
-/// 1. `POST api.alipan.com/v2/share_link/get_share_token`  换 x-share-token
-/// 2. `POST api.alipan.com/adrive/v3/file/list`            列目录
-/// 3. `POST api.alipan.com/adrive/v2/file/get_share_link_download_url`  换直链
-///
-/// 注意：`/adrive/v2|v3/...` 前缀只在 `api.alipan.com` / `api.aliyundrive.com`
-/// 两个域名下存在；`openapi.alipan.com` 上这些路径全部 404，不要混用。
+/// 列目录使用分享 token；原文件下载还需要阿里云盘账号 access_token。
+/// 阿里开放平台 OAuth token 不能替代此处账号 token。
 class AliyunParser extends NetdiskParser {
   AliyunParser(super.http);
 
   static const String apiHost = 'https://api.alipan.com';
 
-  static final Uri _shareTokenUrl = Uri.parse('$apiHost/v2/share_link/get_share_token');
+  static final Uri _shareTokenUrl =
+      Uri.parse('$apiHost/v2/share_link/get_share_token');
   static final Uri _fileListUrl = Uri.parse('$apiHost/adrive/v3/file/list');
   static final Uri _downloadUrlUrl =
-      Uri.parse('$apiHost/adrive/v2/file/get_share_link_download_url');
-  static final Uri _oauthTokenUrl = Uri.parse('https://auth.alipan.com/oauth/access_token');
+      Uri.parse('$apiHost/v2/file/get_share_link_download_url');
+  static final Uri _oauthTokenUrl =
+      Uri.parse('https://auth.alipan.com/v2/account/token');
   static final Uri _userInfoUrl = Uri.parse('$apiHost/v2/user/get');
 
   static const String _webUa =
@@ -30,7 +27,7 @@ class AliyunParser extends NetdiskParser {
       'Chrome/120.0.0.0 Safari/537.36';
 
   /// 直链有效期上限（秒）。
-  static const int maxExpireSec = 14400;
+  static const int maxExpireSec = 600;
 
   @override
   NetdiskPlatform get platform => NetdiskPlatform.aliyun;
@@ -46,9 +43,9 @@ class AliyunParser extends NetdiskParser {
     final uri = extractFirstUrl(input);
     if (uri == null) return null;
     final host = uri.host;
-    if (!host.endsWith('alipan.com') &&
-        !host.endsWith('aliyundrive.com') &&
-        !host.endsWith('alywp.net')) {
+    if (!['alipan.com', 'aliyundrive.com', 'alywp.net'].any(
+      (domain) => host == domain || host.endsWith('.$domain'),
+    )) {
       return null;
     }
 
@@ -82,7 +79,8 @@ class AliyunParser extends NetdiskParser {
     if (existing != null && existing.isNotEmpty) return existing;
     final refresh = credential.refreshToken;
     if (refresh == null || refresh.isEmpty) {
-      throw err(NetdiskErrorCode.loginRequired, '阿里云盘需要 refresh_token 或 access_token');
+      throw err(NetdiskErrorCode.loginRequired,
+          '阿里云盘需要 refresh_token 或 access_token');
     }
     final res = await http.postJson(
       _oauthTokenUrl,
@@ -90,16 +88,21 @@ class AliyunParser extends NetdiskParser {
       headers: _baseHeaders(),
     );
     final json = res.jsonMap;
+    if (json?['code'] != null || res.status < 200 || res.status >= 300) {
+      throw _mapCode(json?['code']?.toString() ?? '', null, res.status);
+    }
     final token = json?['access_token'];
     if (token is! String || token.isEmpty) {
-      throw err(NetdiskErrorCode.credentialExpired, 'refresh_token 换不到 access_token',
-          status: res.status, detail: res.bodyText);
+      throw err(
+          NetdiskErrorCode.credentialExpired, 'refresh_token 换不到 access_token',
+          status: res.status, detail: 'unexpected response structure');
     }
     return token;
   }
 
-  /// 换 x-share-token。这是访问分享内容的唯一凭证。
-  Future<({String token, Map<String, Object?>? shareInfo})> _shareToken(ParsedShareLink link) async {
+  /// 换取用于列出分享内容的 x-share-token。
+  Future<({String token, Map<String, Object?>? shareInfo})> _shareToken(
+      ParsedShareLink link) async {
     final res = await http.postJson(
       _shareTokenUrl,
       body: {
@@ -110,17 +113,22 @@ class AliyunParser extends NetdiskParser {
     );
     final json = res.jsonMap;
     if (json == null) {
+      if (res.status == 401 || res.status == 403 || res.status == 429) {
+        throw _mapCode('', null, res.status);
+      }
       throw err(NetdiskErrorCode.badResponse, '分享 token 响应不是 JSON',
-          status: res.status, detail: res.bodyText);
+          status: res.status, detail: 'unexpected response structure');
     }
     final code = json['code']?.toString() ?? '';
-    if (code.isNotEmpty && code != '200') {
+    if ((code.isNotEmpty && code != '200') ||
+        res.status < 200 ||
+        res.status >= 300) {
       throw _mapCode(code, json['message']?.toString(), res.status);
     }
     final token = json['share_token'];
     if (token is! String || token.isEmpty) {
       throw err(NetdiskErrorCode.badResponse, '没有拿到 share_token',
-          status: res.status, detail: res.bodyText);
+          status: res.status, detail: 'unexpected response structure');
     }
     return (token: token, shareInfo: json);
   }
@@ -128,12 +136,18 @@ class AliyunParser extends NetdiskParser {
   NetdiskException _mapCode(String code, String? message, int status) {
     final text = 'code=$code ${message ?? ''}'.trim();
     switch (code) {
+      case 'ShareLink.Cancelled':
+      case 'ShareLink.Expired':
       case 'ShareLink.NotFound':
       case 'NotFound.ShareLink':
         return err(NetdiskErrorCode.shareNotFound, '分享不存在或已过期',
             status: status, detail: text);
+      case 'AccessTokenInvalid':
+      case 'AccessTokenExpired':
+      case 'RefreshTokenInvalid':
+      case 'InvalidRefreshToken':
       case 'ShareLinkTokenInvalid':
-        return err(NetdiskErrorCode.credentialExpired, 'share_token 无效，需要重新解析',
+        return err(NetdiskErrorCode.credentialExpired, '账号或分享凭证无效，需要更新凭证后重试',
             status: status, detail: text);
       case 'ShareLink.PasswordRequired':
       case 'Forbidden.ShareLinkPassword':
@@ -143,13 +157,16 @@ class AliyunParser extends NetdiskParser {
         return err(NetdiskErrorCode.passwordWrong, '提取码不正确',
             status: status, detail: text);
       case 'TooManyRequests':
-        return err(NetdiskErrorCode.rateLimited, '请求过于频繁', status: status, detail: text);
+        return err(NetdiskErrorCode.rateLimited, '请求过于频繁',
+            status: status, detail: text);
       default:
         if (status == 401 || status == 403) {
-          return err(NetdiskErrorCode.loginRequired, '需要登录', status: status, detail: text);
+          return err(NetdiskErrorCode.loginRequired, '需要登录',
+              status: status, detail: text);
         }
         if (status == 429) {
-          return err(NetdiskErrorCode.rateLimited, '请求过于频繁', status: status, detail: text);
+          return err(NetdiskErrorCode.rateLimited, '请求过于频繁',
+              status: status, detail: text);
         }
         return err(NetdiskErrorCode.badResponse, '阿里云盘接口返回异常 $text',
             status: status, detail: text);
@@ -163,7 +180,26 @@ class AliyunParser extends NetdiskParser {
   }) async {
     final (:token, :shareInfo) = await _shareToken(link);
     final parentId = link.subPath ?? 'root';
-    final files = await _list(link, token, parentId);
+    final files = <NetdiskFile>[];
+    final pending = <({String id, String path})>[(id: parentId, path: '')];
+    final visited = <String>{parentId};
+    final seenFiles = <String>{};
+    for (var i = 0; i < pending.length; i++) {
+      final folder = pending[i];
+      final children = await _list(link, token, folder.id, folder.path);
+      for (final child in children) {
+        if (child.isFolder) {
+          if (visited.add(child.fileId)) {
+            pending.add((
+              id: child.fileId,
+              path: child.extra['relativePath'] as String
+            ));
+          }
+        } else if (seenFiles.add(child.fileId)) {
+          files.add(child);
+        }
+      }
+    }
     if (files.isEmpty) {
       throw err(NetdiskErrorCode.emptyShare, '分享目录为空');
     }
@@ -183,57 +219,78 @@ class AliyunParser extends NetdiskParser {
     ParsedShareLink link,
     String shareToken,
     String parentId,
+    String parentPath,
   ) async {
     final headers = _baseHeaders()
       ..['x-share-token'] = shareToken
       ..['Content-Type'] = 'application/json';
-    final res = await http.postJson(
-      _fileListUrl,
-      body: {
-        'share_id': link.shareId,
-        'parent_file_id': parentId,
-        'limit': 100,
-        'marker': '',
-        'order_by': 'name',
-        'order_direction': 'ASC',
-        'fields': '*',
-        'image_thumbnail_process': 'image/resize,w_160',
-        'video_thumbnail_process': 'video/snapshot,t_1000,f_jpg',
-      },
-      headers: headers,
-    );
-    final json = res.jsonMap;
-    if (json == null) {
-      throw err(NetdiskErrorCode.badResponse, '目录列表响应不是 JSON',
-          status: res.status, detail: res.bodyText);
-    }
-    final code = json['code']?.toString() ?? '';
-    if (code.isNotEmpty && code != '200') {
-      throw _mapCode(code, json['message']?.toString(), res.status);
-    }
-    final items = json['items'];
-    if (items is! List) return const [];
-
     final out = <NetdiskFile>[];
-    for (final item in items) {
-      if (item is! Map) continue;
-      final id = item['file_id']?.toString() ?? '';
-      if (id.isEmpty) continue;
-      final type = item['type']?.toString() ?? 'file';
-      out.add(NetdiskFile(
-        fileId: id,
-        name: item['name']?.toString() ?? id,
-        size: _asInt(item['size']),
-        isFolder: type == 'folder',
-        updatedAt: _asTime(item['updated_at']),
-        parentId: parentId,
-        extra: {
-          'file_extension': item['file_extension']?.toString(),
-          'content_hash': item['content_hash']?.toString(),
-          'thumbnail': item['thumbnail']?.toString(),
-          'category': item['category']?.toString(),
+    final seen = <String>{};
+    final markers = <String>{''};
+    var marker = '';
+    while (true) {
+      final res = await http.postJson(
+        _fileListUrl,
+        body: {
+          'share_id': link.shareId,
+          'parent_file_id': parentId,
+          'limit': 100,
+          'marker': marker,
+          'order_by': 'name',
+          'order_direction': 'ASC',
+          'fields': '*',
+          'image_thumbnail_process': 'image/resize,w_160',
+          'video_thumbnail_process': 'video/snapshot,t_1000,f_jpg',
         },
-      ));
+        headers: headers,
+      );
+      final json = res.jsonMap;
+      if (json == null) {
+        if (res.status == 401 || res.status == 403 || res.status == 429) {
+          throw _mapCode('', null, res.status);
+        }
+        throw err(NetdiskErrorCode.badResponse, '目录列表响应不是 JSON',
+            status: res.status, detail: 'unexpected response structure');
+      }
+      final code = json['code']?.toString() ?? '';
+      if ((code.isNotEmpty && code != '200') ||
+          res.status < 200 ||
+          res.status >= 300) {
+        throw _mapCode(code, json['message']?.toString(), res.status);
+      }
+      final items = json['items'];
+      if (items is! List) {
+        throw err(NetdiskErrorCode.badResponse, '目录列表缺少 items',
+            status: res.status);
+      }
+      for (final item in items) {
+        if (item is! Map) continue;
+        final id = item['file_id']?.toString() ?? '';
+        if (id.isEmpty || !seen.add(id)) continue;
+        final type = item['type']?.toString() ?? 'file';
+        final name = item['name']?.toString() ?? id;
+        out.add(NetdiskFile(
+          fileId: id,
+          name: name,
+          size: _asInt(item['size']),
+          isFolder: type == 'folder',
+          updatedAt: _asTime(item['updated_at']),
+          parentId: parentId,
+          extra: {
+            'relativePath': parentPath.isEmpty ? name : '$parentPath/$name',
+            'file_extension': item['file_extension']?.toString(),
+            'content_hash': item['content_hash']?.toString(),
+            'thumbnail': item['thumbnail']?.toString(),
+            'category': item['category']?.toString(),
+          },
+        ));
+      }
+      final next = json['next_marker'];
+      if (next == null || next == '') break;
+      if (next is! String || !markers.add(next)) {
+        throw err(NetdiskErrorCode.badResponse, '目录分页 marker 没有前进');
+      }
+      marker = next;
     }
     return out;
   }
@@ -247,8 +304,10 @@ class AliyunParser extends NetdiskParser {
     if (file.isFolder) {
       throw err(NetdiskErrorCode.badLink, '文件夹不能直接取直链');
     }
+    final accessToken = await _accessToken(credential);
     final (:token, shareInfo: _) = await _shareToken(link);
     final headers = _baseHeaders()
+      ..['Authorization'] = 'Bearer $accessToken'
       ..['x-share-token'] = token
       ..['Content-Type'] = 'application/json';
 
@@ -265,25 +324,37 @@ class AliyunParser extends NetdiskParser {
     );
     final json = res.jsonMap;
     if (json == null) {
+      if (res.status == 401 || res.status == 403 || res.status == 429) {
+        throw _mapCode('', null, res.status);
+      }
       // 410 是阿里给「share_token / 参数不对」的空响应，没有 JSON body。
       if (res.status == 410) {
-        throw err(NetdiskErrorCode.credentialExpired,
-            'share_token 与文件不匹配，请重新解析后再取直链', status: res.status);
+        throw err(
+            NetdiskErrorCode.credentialExpired, 'share_token 与文件不匹配，请重新解析后再取直链',
+            status: res.status);
       }
       throw err(NetdiskErrorCode.badResponse, '直链响应不是 JSON',
-          status: res.status, detail: res.bodyText);
+          status: res.status, detail: 'unexpected response structure');
     }
     final code = json['code']?.toString() ?? '';
-    if (code.isNotEmpty && code != '200') {
+    if ((code.isNotEmpty && code != '200') ||
+        res.status < 200 ||
+        res.status >= 300) {
       throw _mapCode(code, json['message']?.toString(), res.status);
     }
     final urls = json['urls'];
-    String? url;
-    if (urls is List && urls.isNotEmpty) url = urls.first?.toString();
+    String? url =
+        json['download_url'] is String ? json['download_url'] as String : null;
+    if (url == null &&
+        urls is List &&
+        urls.isNotEmpty &&
+        urls.first is String) {
+      url = urls.first as String;
+    }
     url ??= json['url']?.toString();
     if (url == null || url.isEmpty) {
       throw err(NetdiskErrorCode.badResponse, '直链为空',
-          status: res.status, detail: res.bodyText);
+          status: res.status, detail: 'unexpected response structure');
     }
 
     return NetdiskDownloadLink(
@@ -296,7 +367,8 @@ class AliyunParser extends NetdiskParser {
         'Referer': 'https://www.alipan.com/',
         'User-Agent': _webUa,
       },
-      expiresAt: DateTime.now().add(const Duration(seconds: maxExpireSec)),
+      expiresAt: _asTime(json['expiration']) ??
+          DateTime.now().add(const Duration(seconds: maxExpireSec)),
     );
   }
 
@@ -308,7 +380,18 @@ class AliyunParser extends NetdiskParser {
       body: const {},
       headers: _baseHeaders()..['Authorization'] = 'Bearer $token',
     );
-    return res.jsonMap;
+    final json = res.jsonMap;
+    final code = json?['code']?.toString() ?? '';
+    if ((code.isNotEmpty && code != '200') ||
+        res.status < 200 ||
+        res.status >= 300) {
+      throw _mapCode(code, null, res.status);
+    }
+    if (json == null) {
+      throw err(NetdiskErrorCode.badResponse, '账号信息响应不是 JSON',
+          status: res.status);
+    }
+    return json;
   }
 
   static int _asInt(Object? v) {

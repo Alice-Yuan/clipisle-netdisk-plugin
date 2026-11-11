@@ -1,151 +1,82 @@
-# 接口实测记录
+# 接口探测记录（已修订）
 
-本文记录三个平台接口的实际探测结果，作为代码实现与 README 结论的依据。
-探测日期：2026-11-11。探测环境：Windows x64，Python urllib 直连，无任何代理。
+> 历史警告：本文件早期版本把“收到业务错误”当作成功下载证据，错误宣称百度不能匿名列目录、阿里匿名取链成功，并把阿里 adrive 下载路径的 HTTP 410 空响应判为端点存在。上述结论已撤回。下文替换这些错误记录，保留其修正依据；不要引用旧版本作为平台能力保证。
 
-## 一、阿里云盘：路由枚举
+记录日期：2026-11-11。本文件只输出请求类别、状态和脱敏结论，不保存真实分享 ID、提取码、文件名、账号凭证、下载 URL 或签名。
 
-同一组请求只换 host 与 path，用来确定端点归属。判定标准：返回 `{"message":"uri(...) not exist"}`
-视为**路由不存在**，返回业务错误（`NotFound.ShareLink` / `ShareLinkTokenInvalid` / 410）视为**路由存在**。
+## 结论适用范围
 
-| host | path | 状态码 | 响应 | 判定 |
-|---|---|---|---|---|
-| api.alipan.com | `/v2/share_link/get_share_token` | 404 | `NotFound.ShareLink` | **存在** |
-| api.alipan.com | `/adrive/v2/share_link/get_share_token` | 404 | `uri(...) not exist` | 不存在 |
-| api.alipan.com | `/adrive/v1/share_link/get_share_token` | 404 | `uri(...) not exist` | 不存在 |
-| api.alipan.com | `/adrive/v3/share_link/get_share_token` | 404 | `uri(...) not exist` | 不存在 |
-| api.alipan.com | `/adrive/v3/file/list` | 401 | `ShareLinkTokenInvalid` | **存在** |
-| api.alipan.com | `/adrive/v2/file/list_by_anonymous` | 404 | `uri(...) not exist` | 不存在 |
-| api.alipan.com | `/adrive/v3/share_link/get_share_by_anonymous` | 404 | `NotFound.ShareLink` | **存在** |
-| api.alipan.com | `/adrive/v2/share_link/get_share_by_anonymous` | 404 | `NotFound.ShareLink` | **存在** |
-| api.alipan.com | `/adrive/v2/file/get_share_link_download_url` | 410 | 空 body | **存在** |
-| api.alipan.com | `/adrive/v3/file/get_share_link_download_url` | 404 | `uri(...) not exist` | 不存在 |
-| openapi.alipan.com | 上述所有 `/adrive/*` 与 `/v*/*` | 404 | Spring `{"status":404,"error":"Not Found"}` | 全部不存在 |
+- 路由返回 JSON 或业务错误，只能证明这次请求得到相应响应；不能单独证明认证方式、参数、返回数据或下载能力正确。
+- 元数据解析成功、取得下载 URL、Range 成功与完整下载成功分别记录。
+- 后续真机完成了一个约 7.3 MB 夸克匿名文件下载，但没有大文件或测速结论。百度已真实登录并列目录，原文件取链仍失败；阿里没有真实账号 token 验证。
+- 本轮 Windows Dart 真实验证使用显式遵循环境代理的 IOClient。旧版“Python urllib 无任何代理”的环境断言没有复核，不再作为证据。
 
-结论：
-1. 业务接口挂在 `api.alipan.com`，**不是** `openapi.alipan.com`；
-2. `share_token` 在**根路径** `/v2/share_link/get_share_token`，不带 `/adrive` 前缀；
-3. 其余业务在 `/adrive/v2|v3/...`；
-4. `api.aliyundrive.com` 与 `api.alipan.com` 行为一致（旧域名仍可用）。
+## 夸克：授权样例与会话修正
 
-`get_share_link_download_url` 返回 **410 且无 body**：参数不匹配或 token 无效时是这样，
-不是常规 JSON 错误。代码里 `AliyunParser.resolve` 专门判了 `res.status == 410`。
+### 元数据与提取码
 
-## 二、百度网盘：登录必要性
+| 请求 | 结果 | 能说明什么 |
+| --- | --- | --- |
+| `POST /1/clouddrive/share/sharepage/token`，正确提取码 | `code=0`，取得 stoken | 该分享在请求时可访问 |
+| 同端点，未提供提取码 | `code=41008` | 此样例需要提取码 |
+| 同端点，错误提取码 | `code=41007` | 提取码错误映射应覆盖此码 |
+| `GET /1/clouddrive/share/sharepage/detail` | `code=0`，一个文件条目 | 此样例目录可列出；不构成大目录递归验证 |
+| `POST /1/clouddrive/file/download`，携带 stoken 和文件 token | `code=0`，data 为列表 | 取得了下载 URL，尚不能证明下载请求通过 |
 
-这一条是整个仓库最重要的结论——百度**没有**免登录直链路径。
+上述主流程使用 `drive-pc.quark.cn` 与解析器的 PC 客户端 UA。目录分页/递归的边界由模拟测试覆盖。
 
-```
-POST https://pan.baidu.com/api/sharedownload
-     ?channel=chunlei&clienttype=0&web=1&app_id=250528&sign=X&timestamp=Y
-     form: encrypt=0&product=share&uk=1&primaryid=1&fid_list=[1]
-     Referer: https://pan.baidu.com/s/1abc
+### 下载首字节与后续手机完整下载
 
-→ 200 {"errno":113,"request_id":380514744410851778,
-       "server_time":1794384131,"show_msg":"验证码签名错误"}
-```
+| 请求方式 | 结果 |
+| --- | --- |
+| 使用 URL、UA、Referer，但遗漏匿名会话 Cookie | Range GET 返回 HTTP 412 |
+| 用 CookieJar 保留 API 下发的匿名会话 | Range GET 返回 HTTP 206，仅读 1 字节 |
+| 修复后的 Dart parser：parse → resolve → GET bytes=0-0 | HTTP 206，仅读 1 字节 |
+| Redmi K50 / Android 14，匿名分享经插件加入宿主下载 | 完整落盘 7,332,941 字节；ZIP 36 项 CRC 通过，进度可见 |
 
-```
-GET https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1&fsids=[1]
-    Referer: https://pan.baidu.com/
+匿名 CookieJar 仅观察到 `__pugs`、`__sdid` 两个 Cookie 名称，没有账号登录 Cookie。最终下载所需的 Cookie 必须和生成 URL/文件 token 的会话匹配。
 
-→ 400 {"errmsg":"Invalid Bduss","errno":-6,"request_id":380514819188937334}
-```
+重新换 stoken 而继续使用旧会话取得的文件 token，曾返回 HTTP 403 / `code=41020`。实现现使用私有会话上下文；跨 client/进程或切换账号时重新列父目录刷新文件 token。子目录恢复的自动测试覆盖只保留 extra.pdir_fid 的序列化文件。
 
-两个接口是社区方案里最常被引用的"免登录"路径，实测都需要登录态。
-`errno 113` 的语义是签名/登录态无效，`errno -6` 是 BDUSS 缺失。
+### 端点交叉核对
 
-静态入口本身可达：
+第三方文字中出现的 `/1/clouddrive/share/sharepage/download` 在 `drive-pc.quark.cn` 和 `drive.quark.cn` 的本轮探测均为 HTTP 404。因此没有据此替换实现中实际可用的 `/file/download`。本轮不会把某条第三方接口清单直接写成已支持能力。
 
-```
-GET https://pan.baidu.com/share/tplconfig
-    ?fields=sign,timestamp&channel=chunlei&web=1&app_id=250528&clienttype=0&view_mode=1
+`23018` 仍映射为当前下载大小/权限限制；没有真实账号大文件实测，不能推断只要登录或会员就能解除限制。
 
-→ 200 {"errno":-12,"request_id":380486997437478305,"show_msg":"啊哦，链接出错了"}
+## 百度：目录与下载应分开
+
+旧日志使用虚构分享、虚构 sign/timestamp 或 fs_id 调用 sharedownload/filemetas，得到 errno 113/-6。此类请求不能推出“任何匿名目录解析都失败”，也不能证明一个正确分享上下文的取链结果。
+
+当前实现优先 `share/wxlist` 匿名列目录，并处理提取码、分页与子目录；结构不兼容时兼容网页分享流程。网页流程可能包括 init、verify、分享页、list，以及补齐签名上下文的请求。
+
+当前原文件下载实现需要登录 Cookie。缺少登录凭证时 resolve 会给出登录提示；parse 不再因为缺少账号 Cookie 而提前拒绝。
+
+后续 Redmi K50 / Android 14 已通过插件官方百度网页登录；匿名与登录后的目录均成功。真实 WX 取链返回 `9019`；网页 fallback 一次返回 `errno=0`，但响应没有 dlink，未取得可用链接，不能把成功码写成可下载。官方分享验证恢复入口已实现，19 项插件控制器测试通过；真机已打开对应官方分享页并返回，取链依然返回 9019。百度完整下载尚未通过。
+
+## 阿里：修正端点及认证结论
+
+旧日志把以下请求的 HTTP 410 空响应视为“正确端点已确认”：
+
+```text
+api.alipan.com/adrive/v2/file/get_share_link_download_url
 ```
 
-`errno -12` 说明路由存在、只是参数不对（缺 surl 上下文），说明这条能用。
-但这只给 `sign`/`timestamp`，不给 `dlink`，所以没有登录态照样出不来直链。
+这不足以证明路径、参数或匿名下载能力。本轮实现按主来源核对后采用：
 
-分享页探测：
+| 用途 | 当前采用的接口 | 验证方式 |
+| --- | --- | --- |
+| 分享 token | `api.alipan.com/v2/share_link/get_share_token` | 代码核对与模拟测试 |
+| 分享目录 | `api.alipan.com/adrive/v3/file/list` | x-share-token、next_marker 模拟测试 |
+| 账号 token 刷新 | `auth.alipan.com/v2/account/token` | refresh_token 请求模拟测试 |
+| 原文件下载 | `api.alipan.com/v2/file/get_share_link_download_url` | Authorization、download_url 模拟测试 |
 
-```
-GET https://pan.baidu.com/s/1testtesttest
-→ 404 "页面不存在"
+下载同时需要账号 access_token 与分享 token。开放平台 OAuth token 和这里的账号 token 不应混用。没有真实 token 验证刷新/下载，也没有证明匿名原文件下载，因此该解析器保持库级 experimental，不在 Android 插件里公开。
 
-POST https://pan.baidu.com/share/verify?surl=testtest&t=1&channel=chunlei&web=1&app_id=250528&clienttype=0
-     form: pwd=1234
-→ 200 {"errno":105,"err_msg":"","request_id":380505708748123710}
-```
+仍保留 HTTP 410 的兼容错误处理，不再把它描述为已确认的唯一成因或成功证据。
 
-`errno 105` = 提取码错误，说明链路活着、参数校验在工作。
+## 上游主来源与证据管理
 
-代码里 `BaiduParser.parse()` 在 `credential.isEmpty` 时直接抛 `loginRequired`，
-**不发任何请求**——既然 100% 会失败，就没必要浪费一次往返和被频控的机会。
+夸克流程核对 [qaiu/netdisk-fast-download 的 QkTool](https://github.com/qaiu/netdisk-fast-download/blob/main/parser/src/main/java/cn/qaiu/parser/impl/QkTool.java)。阿里下载和认证核对 [AList driver.go](https://github.com/AlistGo/alist/blob/main/drivers/aliyundrive_share/driver.go) 与 [util.go](https://github.com/AlistGo/alist/blob/main/drivers/aliyundrive_share/util.go)。这里只引用接口行为，未复制实现代码；第三方项目许可证保持独立。
 
-## 三、夸克网盘：链路存活
-
-```
-POST https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc
-     body: {"pwd_id":"","passcode":""}
-→ 404 {"status":404,"code":41006,"message":"分享不存在"}
-
-POST .../token  body: {"pwd_id":"<16位真实id>","passcode":"1234"}
-→ 返回 data.stoken
-```
-
-`41006` 是"分享不存在"的稳定错误码，用来验证路由存在且校验逻辑生效。
-
-```
-GET https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail
-    ?pr=ucpro&fr=pc&pwd_id=test&stoken=x&pdir_fid=0&force=0
-    &_page=1&_size=50&_fetch_banner=0&_fetch_share=1&_fetch_total=1
-→ 400 {"status":400,"code":14001,"message":"Bad Parameter: [分享链接不存在]"}
-```
-
-`14001` 是参数错误（stoken 假），路由存在。
-
-夸克的 UA 必须是 PC 客户端串：
-
-```
-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
-quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100
-Safari/537.36 Channel/pckk_other_ch
-```
-
-用普通浏览器 UA 会被判成网页端，直链接口的行为不同。
-
-## 四、交叉验证：参考项目的实现
-
-从 `qaiu/netdisk-fast-download` 的 `parser/src/main/java/cn/qaiu/parser/impl/QkTool.java`
-读到的夸克链路，与本仓库实测一致：
-
-```java
-TOKEN_URL    = "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token";
-DETAIL_URL   = "https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail";
-DOWNLOAD_URL = "https://drive-pc.quark.cn/1/clouddrive/file/download";
-```
-
-它的 `23018` 处理逻辑（`needsTransferFallback` 判 `size limit` / `download file size limit`）
-也被采纳进本仓库的错误映射——这是免登录大小上限的稳定症状。
-
-该仓库**没有百度解析器**：对 30+ 个 Java 文件、JS 解析器、配置做 `baidu|pan.baidu|yunpan.baidu`
-全量搜索，零命中。所以本仓库的百度实现是按官方接口从零写的，没有可对照的实现。
-
-它的阿里云盘痕迹只留在测试文件里（`JsHttpClientTest.java` 里几处注释提到
-`auth.aliyundrive.com/v2/account/token` 与 `alipan.js`），没有生产代码。
-
-## 五、未验证的部分
-
-以下内容**没有**实测，README 里也没写成已支持：
-
-1. 真实分享的完整下载（接口通 ≠ 能下下来，需要用户提供真实链接）；
-2. 百度带 Cookie 的完整链路（本机无百度账号 Cookie）；
-3. 夸克带 Cookie 的大文件直链（同上）；
-4. 阿里云盘 `refresh_token` 换 `access_token`（本机无 token）；
-5. 提取码分享的全流程（需要真实带提取码的分享）；
-6. 各平台直链的真实有效期（代码里写的是经验值：夸克 1h / 百度 4h / 阿里 4h）；
-7. 限速、并发限制、IP 频控阈值。
-
-要补齐这些，需要在有真实凭证的环境里跑一遍。代码结构已经把凭证做成了参数，
-`NetdiskCredential` 传进去即可，不需要改实现。
+真实样例仅用于已授权的本机/手机验证；早期网络 probe 临时文件已经清理。后续手机完整下载仅公开读取量、校验及成败状态，检查未发现 Cookie 或签名 URL 写入宿主任务；不提交原始响应、凭证、分享内容或带签名链接。暂停恢复、停用卸载等自动回归不能当作已经执行的手机步骤。完整验收边界见 [审查与验证记录](review-and-verification.md)。

@@ -1,0 +1,48 @@
+{
+  "formatVersion": 1,
+  "apiVersion": 1,
+  "id": "com.clipisle.netdisk",
+  "name": "网盘下载",
+  "description": "百度网盘 · 夸克网盘",
+  "version": "0.1.0",
+  "packageName": "com.clipisle.netdiskplugin",
+  "source": "https://github.com/Alice-Yuan/netdisk-direct",
+  "category": "platform",
+  "activationAction": "com.clipisle.plugin.NETDISK_AUTHORIZE",
+  "permissions": [
+    "android.permission.INTERNET"
+  ],
+  "capabilities": [
+    "http.resolve",
+    "settings",
+    "accounts"
+  ],
+  "uiContributions": [
+    {
+      "slot": "plugin.settings",
+      "action": "settings",
+      "title": "设置",
+      "icon": "settings"
+    }
+  ],
+  "inputMatchers": [
+    {
+      "scheme": "https",
+      "host": "pan.quark.cn",
+      "pathPrefix": "/s/",
+      "cancelMethod": "cancelInput"
+    },
+    {
+      "scheme": "https",
+      "host": "pan.baidu.com",
+      "pathPrefix": "/s/",
+      "cancelMethod": "cancelInput"
+    },
+    {
+      "scheme": "https",
+      "host": "pan.baidu.com",
+      "pathPrefix": "/share/init",
+      "cancelMethod": "cancelInput"
+    }
+  ]
+}

@@ -1,170 +1,30 @@
 # netdisk-direct
 
-网盘分享链接 → 直链 → 下载。只做三个平台：**百度网盘 / 夸克网盘 / 阿里云盘**。
+网盘分享目录解析、下载链接获取与 HTTP 下载。根目录是纯 Dart 库；`plugin/` 是单独安装的 ClipIsle Android 插件，支持百度网盘和夸克网盘。阿里云盘仅保留为库中的 experimental 实现。
 
-纯 Dart，无 Flutter 依赖，可同时用于命令行、服务端和 Flutter 应用。
+当前源码版本为 `0.1.0`。公开仓库已创建：[Alice-Yuan/netdisk-direct](https://github.com/Alice-Yuan/netdisk-direct)。安装包与插件清单见 [v0.1.0 Release](https://github.com/Alice-Yuan/netdisk-direct/releases/tag/v0.1.0)。
 
-```dart
-final client = NetdiskClient();
-final share = await client.parse('https://pan.quark.cn/s/abc123 提取码: 8x9k');
-for (final file in share.downloadableFiles) {
-  final link = await client.resolveDownloadFrom(detect, file);
-  print('${file.name} -> ${link.url}');
-}
-```
+## 安装
 
-## 实现状态（不是设计目标，是实测结论）
+更新 ClipIsle 宿主后，在「插件 → 从 GitHub 添加」输入 `Alice-Yuan/netdisk-direct`，确认安装与首次授权。插件设置中管理账号；粘贴分享文本后选择文件，任务直接进入宿主下载队列。
 
-| 平台 | 免登录解析 | 免登录取直链 | 需要什么 |
-|---|---|---|---|
-| 夸克网盘 | 可以 | 小文件可以，超限返回 `code 23018` | 大文件需 Cookie |
-| 阿里云盘 | 可以 | 可以 | 无需凭证 |
-| 百度网盘 | 不行 | 不行 | 必须 `BDUSS` + `STOKEN` |
+**当前夸克已完成一个真实样例的完整下载；百度仅登录与目录解析验收通过，取原文件仍受限。**
 
-百度这一条是硬结论，不是偷懒。实测无 Cookie 直接打接口：
+## 支持范围
 
-```
-POST https://pan.baidu.com/api/sharedownload
-  → {"errno":113,"show_msg":"验证码签名错误"}
+| 平台 | 匿名列目录 | 获取原文件下载链接 | Android 插件 |
+| --- | --- | --- | --- |
+| 百度网盘 | 匿名与登录目录均已真机验证 | 需要登录；本轮真实取链仍失败，不能宣称下载通过 | 已接入，下载验证待完成 |
+| 夸克网盘 | 已实现 | 已完成一个匿名样例的手机完整下载，仍需要匿名会话 Cookie | 已接入 |
+| 阿里云盘 | 已实现，experimental | 需要阿里云盘账号 access_token，或账号 refresh_token 换取 | 未公开接入 |
 
-GET  https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1
-  → {"errmsg":"Invalid Bduss","errno":-6}
-```
+“匿名”指无需用户账号，不表示请求完全不需要 Cookie。有效直链、账号会员状态都不保证不限速、不保证大文件权限，也不绕过服务端风控。取链成功与完整下载成功是不同的验证层次。
 
-所以 `BaiduParser.parse()` 在凭证为空时**直接抛 `loginRequired`，一个请求都不发**，不做无意义的往返。
+当前解析器会翻页并遍历子目录，返回可下载文件的扁平列表。`file.name` 保持文件名，`file.extra['relativePath']` 用于展示目录层级。自动测试覆盖多页、多目录和同名文件；没有用超大真实分享验证整个目录树。
 
-## 三个平台的真实接口链
+## Dart 库
 
-全部由本仓库实际请求验证可达，不是抄文档。
-
-### 夸克
-
-```
-POST https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc
-     body {"pwd_id":"<shareId>","passcode":"<提取码>"}   → data.stoken
-GET  https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail
-     ?pwd_id&stoken&pdir_fid=0&_page=1&_size=50&...      → data.list[]
-POST https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc
-     body {"fids":["<fid>"],"pwd_id","stoken","fids_token":["<share_fid_token>"]}
-                                                          → data[0].download_url
-```
-
-要点：
-- `share_fid_token` 必须从 detail 响应里带上，否则 download 会拒；
-- 根目录常常只有一个文件夹套着文件，`_drillDown` 会自动往下钻（最深 4 层，每层最多 12 个文件夹）；
-- 错误码映射：`41006` 分享不存在、`41004` 需提取码、`41001/41002` 提取码错、`31001` Cookie 失效、`23018` 超大小上限。
-
-### 阿里云盘
-
-```
-POST https://api.alipan.com/v2/share_link/get_share_token
-     body {"share_id":"<id>","share_pwd":"<提取码>"}      → share_token
-POST https://api.alipan.com/adrive/v3/file/list
-     header x-share-token: <token>
-     body {"share_id","parent_file_id":"root","limit":100,...}  → items[]
-POST https://api.alipan.com/adrive/v2/file/get_share_link_download_url
-     header x-share-token: <token>
-     body {"share_id","file_id","expire_sec":14400}       → urls[0]
-```
-
-**域名坑**（这条踩过，写进代码注释了）：
-- `/v2/share_link/get_share_token` 只在 **`api.alipan.com` / `api.aliyundrive.com`** 的**根路径**下存在，前面**不加** `/adrive` 前缀；
-- `/adrive/v2|v3/...` 系列在 `openapi.alipan.com` 上**全部 404**，不要混用；
-- `get_share_link_download_url` 参数不对时返回 **HTTP 410 空响应**，没有 JSON body，代码里专门判了这种情况。
-
-路由枚举实测（同一次请求，只换 host/path）：
-
-| 路径 | api.alipan.com | openapi.alipan.com |
-|---|---|---|
-| `/v2/share_link/get_share_token` | ✅ 存在 | ❌ 404 |
-| `/adrive/v3/file/list` | ✅ 存在 | ❌ 404 |
-| `/adrive/v3/share_link/get_share_by_anonymous` | ✅ 存在 | ❌ 404 |
-| `/adrive/v2/file/get_share_link_download_url` | ✅ 存在 | ❌ 404 |
-| `/adrive/v2/file/list_by_anonymous` | ❌ 不存在 | ❌ 不存在 |
-
-### 百度
-
-```
-GET  https://pan.baidu.com/share/init?surl=<surl>&channel=chunlei&web=1&app_id=250528
-                                                          → Set-Cookie: BAIDUID/STOKEN
-POST https://pan.baidu.com/share/verify?surl=<surl>&t=<ts>&...
-     form pwd=<提取码>                                     → Set-Cookie: BDCLND=<randsk>
-GET  https://pan.baidu.com/s/<surl>
-     → HTML 里 window.yunData.setData({shareid,share_uk,sign,timestamp,sekey})
-GET  https://pan.baidu.com/share/list?shareid&uk&dir=/&page=1&num=100&sekey
-                                                          → list[]
-POST https://pan.baidu.com/api/sharedownload?sign&timestamp&channel=chunlei&...
-     form encrypt=0&product=share&uk&primaryid&fid_list=[<fs_id>]&extra={"sekey":...}
-                                                          → list[0].dlink
-```
-
-要点：
-- `BDCLND` 必须从 `verify` 的 **Set-Cookie** 里捞，直接拼在后续 Cookie 上，否则带提取码的分享列不出文件；
-- `yunData` 从 HTML 里抠，用的是括号配对扫描（`_matchBrace`），不是正则——里面有字符串和转义，正则会被反斜杠带偏；
-- `sign` / `timestamp` 页面里偶尔缺，会回落到 `/share/tplconfig?fields=sign,timestamp` 再补一次；
-- **dlink 下载时必须用 `User-Agent: pan.baidu.com`**，用浏览器 UA 直接 403。这条在 `BaiduParser.downloadUserAgent` 里，`NetdiskDownloadLink.headers` 会带出去。
-
-## 下载器
-
-`Downloader` 不是简单 `client.send` 循环，针对网盘直链的三个真实毛病：
-
-**1. 速度按墙上时间采样，停流归零。**
-很多实现只在收到字节时算速度，流一停就冻在最后一次的值上（显示 `3.1 KB/s` 十几分钟不动）。这里用 `Timer.periodic(500ms)` 独立采样，2 秒没字节就归零。
-
-**2. 无进度看门狗。**
-`idleTimeout`（默认 30 秒）内收不到任何字节 → 判定停滞 → 中断并续传重试，而不是被 HTTP 的 `receiveTimeout`（动辄 10 分钟）拖死。
-
-**3. 断点续传 + 内容身份校验。**
-`.part` 文件 + `.part.meta` 存 `ETag`/`Last-Modified`。续传前先 `Range: bytes=0-0` 探一次：
-- 服务端不支持 Range（返回 200 而非 206）→ 丢弃旧分片从头下；
-- `ETag` 变了 → 内容已经不是同一份，丢弃旧分片；
-- 旧分片比总量还大 → 丢弃。
-
-不做这一步就会把两份不同内容拼在一起，出来的文件永远是坏的。
-
-直链过期（403 / 404 / 410）会触发 `onRefreshLink` 回调换一条新链继续，网盘直链通常 1–4 小时过期。
-
-## 用法
-
-### 库
-
-```dart
-import 'package:netdisk_direct/netdisk_direct.dart';
-
-final client = NetdiskClient();
-final link = client.detect(input);          // 认平台 + 抠提取码
-final share = await client.parseLink(link, credential: cred);
-
-// 单个
-final dl = await client.resolveDownloadFrom(link, share.files.first, credential: cred);
-
-// 批量，并发 3，失败隔离
-final results = await client.resolveAll(link, share.downloadableFiles, concurrency: 3);
-for (final r in results) {
-  if (r.link != null) print('${r.file.name} -> ${r.link!.url}');
-  else print('${r.file.name} 失败：${r.error}');
-}
-```
-
-### 命令行
-
-```sh
-dart run bin/netdisk.dart info  "<链接> 提取码: xxxx"
-dart run bin/netdisk.dart links "<链接>"
-dart run bin/netdisk.dart get   "<链接>" -o ./downloads
-```
-
-凭证走环境变量，不进 shell 历史：
-
-```sh
-export NETDISK_BAIDU_COOKIE='BDUSS=xxx; STOKEN=yyy'
-export NETDISK_QUARK_COOKIE='__pus=xxx; __puus=yyy'
-export NETDISK_ALIYUN_REFRESH='xxxxx'
-```
-
-### 在 ClipIsle 里接入
-
-这个库是纯 Dart，可以直接作为 ClipIsle 的 dependency：
+开发环境要求 Dart SDK `^3.6.0`。源码直接引用示例：
 
 ```yaml
 dependencies:
@@ -172,58 +32,143 @@ dependencies:
     path: ../netdisk-direct
 ```
 
-然后写一个 `PlatformKind` 适配器，把 `NetdiskShare` 转成 ClipIsle 的 `MediaItem`，直链丢给现有的 `DownloadManager`。注意两点：
-- ClipIsle 现有下载器**没有**上面说的零速归零和无进度看门狗，接网盘直链前建议先把这两个补上（见 `docs/12-download-speed-diagnosis.md`）；
-- 百度必须走 Cookie，ClipIsle 已有的 `SessionStore` 可以直接存。
+```dart
+import 'package:netdisk_direct/netdisk_direct.dart';
 
-## 错误码
+Future<void> downloadShare(String input, String targetPath) async {
+  final client = NetdiskClient();
+  final downloader = Downloader();
+  const credential = NetdiskCredential.none();
+  try {
+    final source = client.detect(input);
+    final share = await client.parseLink(source, credential: credential);
+    final file = share.downloadableFiles.first;
+    final direct = await client.resolveDownloadFrom(
+      source, file, credential: credential,
+    );
+    await downloader.download(
+      direct,
+      targetPath: targetPath,
+      onRefreshLink: () => client.resolveDownloadFrom(
+        source, file, credential: credential,
+      ),
+    );
+  } finally {
+    downloader.close();
+    client.close();
+  }
+}
+```
 
-所有异常是 `NetdiskException`，带稳定的 `NetdiskErrorCode`，不依赖服务端文案。
+这个示例选择第一个文件；需要登录的平台应提供 `NetdiskCredential(cookie: ...)` 或账号 token。批量获取可用 `resolveAll()`，每个结果独立保留错误。调用其他下载器时也要使用 `NetdiskDownloadLink.headers`，仅复制 URL 可能得到 403/412。
 
-| code | 含义 | 典型触发 |
-|---|---|---|
-| `badLink` | 链接格式无法识别 | 输入为空、对文件夹取直链 |
-| `unsupportedPlatform` | 不是这三个平台 | 贴了 123pan / 蓝奏云链接 |
-| `shareNotFound` | 分享不存在/已取消/过期 | 夸克 41006、阿里 NotFound.ShareLink |
-| `passwordRequired` | 需要提取码 | 夸克 41004、百度 errno 12 |
-| `passwordWrong` | 提取码错 | 夸克 41001/41002、百度 -9/105 |
-| `loginRequired` | 需要登录凭证 | 百度无 Cookie、阿里 401 |
-| `credentialExpired` | 凭证失效 | 夸克 31001、阿里 ShareLinkTokenInvalid / 410 |
-| `sizeLimitExceeded` | 超免登录大小上限 | 夸克 23018 |
-| `emptyShare` | 分享内容为空 | 目录里没有文件 |
-| `rateLimited` | 频控 | 429、百度 -62 |
-| `network` | 网络层失败 | 超时、连接中断 |
-| `badResponse` | 结构不符合预期 | JSON 解析失败、缺字段 |
+跨 client 或进程恢复时，要在私有存储保留 `ParsedShareLink` 的提取码上下文以及文件的 ID、父目录和必要 extra。夸克会重新列父目录刷新与当前会话绑定的文件 token；不能直接使用旧会话的 `share_fid_token`。不要把凭证、带签名直链或私有上下文写入公开日志。
 
-## 测试
+### 命令行
 
 ```sh
 dart pub get
-dart analyze     # 零问题
-dart test        # 35 项全过
+dart run bin/netdisk.dart info "<分享文本>"
+dart run bin/netdisk.dart links "<分享文本>"
+dart run bin/netdisk.dart get "<分享文本>" -o ./downloads
 ```
 
-测试用 `MockClient` 打桩，覆盖：
-- 三平台的完整接口链（token → list → download）；
-- 提取码传递（夸克 `passcode`、阿里 `share_pwd`、百度 `pwd` + `BDCLND`）；
-- 错误码映射（41006 / 23018 / 410 / ShareLinkTokenInvalid / errno -6 / -9）；
-- 夸克根目录只有文件夹时的自动下钻；
-- 下载器：速度采样、403 换链、断点续传保留前缀字节、ETag 变化丢弃分片、取消。
+凭证从进程环境读取：
 
-## 已知限制
+| 环境变量 | 用途 |
+| --- | --- |
+| `NETDISK_BAIDU_COOKIE` | 百度账号 Cookie，取链使用 |
+| `NETDISK_QUARK_COOKIE` | 夸克账号 Cookie，可选，不能保证解除下载限制 |
+| `NETDISK_ALIYUN_ACCESS` | 阿里云盘账号 access_token |
+| `NETDISK_ALIYUN_REFRESH` | 阿里云盘账号 refresh_token |
 
-- **百度**需要用户自己提供 Cookie，本库不实现登录流程（扫码/账号密码）。
-- **夸克**免登录直链有大小上限，大文件必须配 Cookie；转存（save + task 轮询）路径未实现。
-- **阿里云盘**匿名路径已通；`refresh_token` 换 `access_token` 的代码在 `_accessToken()` 里，但匿名解析不需要它。会员画质判断未做。
-- 只取分享**根目录第一层**（夸克会下钻找文件），多级目录的完整递归遍历未实现。
-- 直链有效期是各平台的经验值（夸克 1h / 百度 4h / 阿里 4h），实际以服务端为准，过期靠 403 触发换链。
-- **没有在任何真实分享上跑过完整下载**——本轮只验证了接口可达性与错误映射。要确认能真下下来，需要你给一个真实分享链接。
+请用本机的安全方式注入环境，不要把真实值提交到脚本或仓库。CLI 的 `info`/`links` 会输出分享元数据，`links` 还会输出临时下载 URL；这些输出也应按私有数据处理。CLI 会清理远端文件名，并对重名文件分配后缀；它不会自动还原整个目录树到磁盘。
 
-## 参考项目
+如运行环境需要代理，可注入自己配置的 `HttpClient`。本轮 Windows 真实验证显式使用了遵循环境代理的 `IOClient`；这不是所有部署环境的网络保证。
 
-看过的两个：
+## 独立 Android 插件
 
-- [hmjz100/LinkSwift](https://github.com/hmjz100/LinkSwift) — 油猴脚本，前端注入方式取直链，逻辑全在浏览器里跑，靠页面已登录的会话。**没法直接用**：它依赖用户浏览器上下文，服务端/CLI 跑不起来。有用的部分是 `config/*.json` 里的接口清单，拿来对照了百度和夸克的 endpoint。AGPL3。
-- [qaiu/netdisk-fast-download](https://github.com/qaiu/netdisk-fast-download) — Java/Vert.x 服务端，覆盖 30+ 网盘。**架构参考价值大于代码复用**：它的 `PanDomainTemplate` 枚举（正则 → 标准 URL → Parser 类）是我这套 `NetdiskParser.match` 的雏形；`QkTool` 的夸克三级链路（token → detail → download）和 `23018` 处理直接对本仓库的夸克实现做了交叉验证。但它**没有百度解析器**（grep 全仓库 `baidu` 零命中），阿里云盘的实现也只剩测试里的注释，所以这两个平台是按官方接口自己写的。
+插件源码位于 `plugin/`，包名 `com.clipisle.netdiskplugin`，最低 Android 8.0（API 26）。它通过 Android Service/Messenger 与 ClipIsle 通信，并由宿主展示声明式文件选择与账号页面。网页登录在插件自己的 WebView 中进行。
 
-两个项目的许可证不同（AGPL3 / 未标注），本仓库没有复制它们的代码，只参考了接口路径和流程结构。接口路径本身是公开的服务端行为，不属于可版权标的。
+宿主必须包含新版插件协议实现：
+
+1. 输入匹配支持 `scheme`、精确 `host` 和 `pathPrefix`，不能把所有 HTTPS 链接都交给网盘插件。
+2. `parseInput` 返回文件选择页，`prepareDownloads` 返回 `downloads` 描述符；描述符包含不透明 `resourceId`，不把临时直链当作长期任务身份。
+3. 下载真正开始、重试或恢复时，宿主调用插件 `resolveDownload` 获取当前下载链接和必要请求头，并将任务接入宿主下载管理器。
+4. 任务持久化保留资源身份；签名 URL、下载 Cookie 和 mirrors/headers 不落盘。必要下载会话只通过受信 IPC 交给宿主内存，仅向下载地址最初的 HTTPS origin 发送。
+
+协议仍标记 API 1，但宿主还必须支持上述新增输入与下载描述符行为；不能据此认定所有旧宿主兼容。旧宿主即使能发现 APK，也可能不识别网盘输入、文件列表或下载描述符。
+
+在 Redmi K50 / Android 14 上，MIUI 曾拦截后台绑定插件服务。当前通过透明激活页面预热服务后再绑定，已经完成实机下载链路。首次宿主签名授权仍保留，后续下载不逐次弹出确认。
+
+账号凭证由插件通过 Android Keystore 支持的加密私有存储保存。必要下载 Cookie 可能通过受信 IPC 提供给宿主下载内存，因此不能声称 Cookie 永远不离开插件。插件注销与 WebView Cookie 清理的行为仍需按具体版本验收。
+
+构建调试包：
+
+```sh
+cd plugin
+flutter pub get
+flutter test
+flutter build apk --debug
+```
+
+发布构建使用本地签名配置，不应提交 `key.properties`、私钥或 keystore。根目录的 Dart 测试不能替代 APK 构建、网页登录、受信 IPC 与手机真实下载验收。
+
+## 接口流程
+
+这些是当前实现采用的非开放网页接口，服务端可能改变。错误响应只能说明一次请求的结果，不能据此承诺接口长期可用。
+
+### 百度
+
+优先使用 `share/wxlist` 匿名列目录并翻页；结构不兼容时尝试网页分享流程。带提取码的网页流程包括 `share/init`、`share/verify`、分享页上下文和 `share/list`，并保留验证响应中的 `BDCLND`。
+
+取链使用有效账号 Cookie 和分享上下文调用 `api/sharedownload`；返回下载链接携带下载所需的 UA/Referer。匿名能列目录不等于匿名能取原文件链接。本轮已在 Redmi K50 / Android 14 完成官方百度网页登录，匿名与登录目录均成功。真实 WX 取链返回 `9019`；网页 fallback 曾返回 `errno=0` 却没有 dlink，未取得可用链接，尚未完成百度下载。官方分享访问验证恢复入口已实现并有控制器回归覆盖，真机已打开对应官方分享页并返回，取链依然返回 9019。
+
+### 夸克
+
+```text
+POST drive-pc.quark.cn/1/clouddrive/share/sharepage/token
+GET  drive-pc.quark.cn/1/clouddrive/share/sharepage/detail
+POST drive-pc.quark.cn/1/clouddrive/file/download
+```
+
+请求携带分享 ID、提取码、stoken 和从目录列表取得的文件 token。目录按页遍历；相同会话的 Cookie 必须贯穿 API 与下载。真实匿名样例中，缺少匿名 Cookie 的 Range 请求返回 412，保留 `__pugs`/`__sdid` 后返回 206。早期 Dart probe 只读取了 1 字节；后续 Redmi K50 / Android 14 已匿名完整落盘 7,332,941 字节，ZIP 共 36 项 CRC 校验通过，宿主下载进度可见。该样例不代表大文件、会员速度或所有分享均已验收。
+
+不要仅依据第三方文字把下载端点改成 `share/sharepage/download`：本轮该路径在两个 Quark API 域名均返回 404，实际采用的 `file/download` 路径成功取得链接。
+
+### 阿里云盘（experimental）
+
+```text
+POST api.alipan.com/v2/share_link/get_share_token
+POST api.alipan.com/adrive/v3/file/list
+POST auth.alipan.com/v2/account/token                 # 需要刷新账号 token 时
+POST api.alipan.com/v2/file/get_share_link_download_url
+```
+
+列目录携带 `x-share-token` 并跟随 `next_marker`；下载另外需要账号 `Authorization`，读取 `download_url`。账号 token 与开放平台 OAuth token 不可混用。当前没有真实账号验证刷新、下载权限或 refresh_token 轮换，因此不在 Android 插件中提供此平台。
+
+## 下载器与错误
+
+库内 `Downloader` 提供周期速度采样、无进度超时、有限重试、刷新链接回调、取消与断点续传。续传依据 Range 响应以及 ETag/Last-Modified 校验；服务端缺少可用内容标识时从头下载。它还检查响应范围、提前截断和目标文件冲突，避免把异常响应拼接进旧文件。
+
+`NetdiskException.code` 可区分 `passwordRequired`、`passwordWrong`、`loginRequired`、`credentialExpired`、`shareNotFound`、`sizeLimitExceeded`、`rateLimited`、`emptyShare`、`network` 和 `badResponse` 等情况。`sizeLimitExceeded` 表示当前服务端限制，不等于登录或开通会员必定解决。
+
+## 验证与限制
+
+```sh
+dart analyze
+dart test
+cd plugin
+flutter analyze
+flutter test
+```
+
+本轮根库 131 项、插件 19 项、宿主 1,286 项自动测试通过，对应静态分析均无问题。测试覆盖分页/递归、凭证与提取码传递、夸克会话绑定及新 client 恢复、错误映射、下载停滞/取消/续传和插件控制器。
+
+真机已确认签名插件安装、发现、启用、授权、官方百度登录与目录，以及夸克匿名完整下载。暂停/恢复、停用/卸载等边界属于自动回归范围，未全部完成真机验收；百度下载仍待解决。详见 [审查与验证记录](docs/review-and-verification.md) 和 [接口探测记录](docs/api-probe-log.md)。
+
+目前没有夸克转存后下载实现，没有针对所有账号和会员等级的验证，也没有真实大文件完整下载、吞吐或多 IP 风控保证。平台协议变动可能需要更新解析器。
+
+## 参考与许可证
+
+本仓库按 [MIT License](LICENSE) 提供。审查对照了 [qaiu/netdisk-fast-download 的 QkTool](https://github.com/qaiu/netdisk-fast-download/blob/main/parser/src/main/java/cn/qaiu/parser/impl/QkTool.java) 的夸克接口行为，以及 [AList 的阿里分享驱动](https://github.com/AlistGo/alist/tree/main/drivers/aliyundrive_share) 的账号认证、分页和下载字段；本轮修复与测试独立编写，未复制上游实现。参考项目保留各自许可证；后续若直接复用上游代码，应按其许可证处理。

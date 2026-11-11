@@ -13,11 +13,15 @@ import 'platforms/platforms.dart';
 /// final link = await client.resolveDownload(share, share.files.first);
 /// ```
 class NetdiskClient {
-  NetdiskClient({
+  factory NetdiskClient({
     HttpClient? http,
     List<NetdiskParser>? parsers,
-  })  : http = http ?? HttpClient(),
-        parsers = parsers ?? defaultParsers(http ?? HttpClient());
+  }) {
+    final transport = http ?? HttpClient();
+    return NetdiskClient._(transport, parsers ?? defaultParsers(transport));
+  }
+  NetdiskClient._(this.http, this.parsers);
+  final _contexts = Expando<ParsedShareLink>();
 
   final HttpClient http;
   final List<NetdiskParser> parsers;
@@ -36,7 +40,7 @@ class NetdiskClient {
     throw NetdiskException(
       NetdiskErrorCode.unsupportedPlatform,
       '不支持的链接，本库只处理百度网盘 / 夸克网盘 / 阿里云盘',
-      detail: uri?.host ?? text,
+      detail: uri?.host,
     );
   }
 
@@ -56,26 +60,29 @@ class NetdiskClient {
             password: password,
             subPath: link.subPath,
           );
-    return _parserFor(effective.platform)
-        .parse(effective, credential: credential);
+    return parseLink(effective, credential: credential);
   }
 
   /// 用一个已经识别好的链接再解析（避免重复 detect）。
   Future<NetdiskShare> parseLink(
     ParsedShareLink link, {
     NetdiskCredential credential = const NetdiskCredential.none(),
-  }) =>
-      _parserFor(link.platform).parse(link, credential: credential);
+  }) async {
+    final share =
+        await _parserFor(link.platform).parse(link, credential: credential);
+    _contexts[share] = link;
+    return share;
+  }
 
   /// 把文件换成直链。
   ///
-  /// 注意：分享对象不保留提取码，带提取码的分享请用 [resolveDownloadFrom]。
+  /// 同一客户端解析出的分享会复用私有提取码上下文；跨客户端请用 [resolveDownloadFrom]。
   Future<NetdiskDownloadLink> resolveDownload(
     NetdiskShare share,
     NetdiskFile file, {
     NetdiskCredential credential = const NetdiskCredential.none(),
   }) async {
-    final link = detect(share.shareUrl ?? '');
+    final link = _contexts[share] ?? detect(share.shareUrl ?? '');
     return _parserFor(share.platform)
         .resolve(link, file, credential: credential);
   }
@@ -98,10 +105,15 @@ class NetdiskClient {
     void Function(int done, int total)? onProgress,
   }) async {
     final parser = _parserFor(link.platform);
-    final out = <({NetdiskFile file, NetdiskDownloadLink? link, Object? error})>[];
+    final out = List<
+        ({
+          NetdiskFile file,
+          NetdiskDownloadLink? link,
+          Object? error
+        })?>.filled(files.length, null);
     var cursor = 0;
     var done = 0;
-    final limit = concurrency < 1 ? 1 : concurrency;
+    final limit = concurrency.clamp(1, 8).clamp(0, files.length);
 
     Future<void> worker() async {
       while (true) {
@@ -109,10 +121,11 @@ class NetdiskClient {
         if (index >= files.length) return;
         final file = files[index];
         try {
-          final direct = await parser.resolve(link, file, credential: credential);
-          out.add((file: file, link: direct, error: null));
+          final direct =
+              await parser.resolve(link, file, credential: credential);
+          out[index] = (file: file, link: direct, error: null);
         } catch (e) {
-          out.add((file: file, link: null, error: e));
+          out[index] = (file: file, link: null, error: e);
         }
         done++;
         onProgress?.call(done, files.length);
@@ -120,15 +133,7 @@ class NetdiskClient {
     }
 
     await Future.wait(List.generate(limit, (_) => worker()));
-    // 保持与输入一致的顺序，方便调用方按序号对应。
-    final order = <String, int>{};
-    for (var i = 0; i < files.length; i++) {
-      order[files[i].fileId] = i;
-    }
-    out.sort(
-      (a, b) => (order[a.file.fileId] ?? 0).compareTo(order[b.file.fileId] ?? 0),
-    );
-    return out;
+    return out.map((entry) => entry!).toList(growable: false);
   }
 
   NetdiskParser _parserFor(NetdiskPlatform platform) {
