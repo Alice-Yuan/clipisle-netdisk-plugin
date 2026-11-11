@@ -1,0 +1,16 @@
+name: netdisk_direct
+description: 网盘分享链接直链解析与下载库 — 百度网盘 / 夸克网盘 / 阿里云盘
+version: 0.1.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  http: ^1.2.2
+  path: ^1.9.0
+  crypto: ^3.0.6
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.8

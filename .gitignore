@@ -1,0 +1,19 @@
+# Dart
+.dart_tool/
+.packages
+pubspec.lock
+build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 下载产物
+downloads/
+*.part
+*.part.meta
+
+# 系统
+.DS_Store
+Thumbs.db
