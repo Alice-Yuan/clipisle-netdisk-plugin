@@ -57,6 +57,11 @@ BaiduParser browserDownloadResponse(Map<String, Object?> payload) {
         return http.Response(
             '<script>locals.mset({"shareid":42,"uk":17,"sign":"browser-sign","timestamp":2});</script>',
             200);
+      case '/api/gettemplatevariable':
+        return response({
+          'errno': 0,
+          'result': {'bdstoken': 'browser-csrf'}
+        });
       case '/api/sharedownload':
         attempts++;
         if (attempts == 1) return response({'errno': 9019});
@@ -69,6 +74,363 @@ BaiduParser browserDownloadResponse(Map<String, Object?> payload) {
 }
 
 void main() {
+  for (final authenticated in [false, true]) {
+    for (final outcome in [
+      'success',
+      'browserSignature9019',
+      'browserDownload9019'
+    ]) {
+      test(
+          'WX tplconfig 9019 gets one browser attempt: authenticated=$authenticated outcome=$outcome',
+          () async {
+        final requests = <http.Request>[];
+        var signatures = 0;
+        var downloads = 0;
+        final parser = parserFor((request) async {
+          requests.add(request);
+          switch (request.url.path) {
+            case '/share/wxlist':
+              return listing([item(1)]);
+            case '/share/tplconfig':
+              signatures++;
+              if (signatures == 1) {
+                expect(request.headers['User-Agent'], 'netdisk');
+                return response({'errno': 9019});
+              }
+              expect(signatures, 2,
+                  reason: 'Only one browser signature attempt');
+              expect(request.headers['User-Agent'], contains('Mozilla'));
+              if (outcome == 'browserSignature9019') {
+                return response({'errno': 9019});
+              }
+              return response({
+                'errno': 0,
+                'data': {'sign': 'browser-sign', 'timestamp': 2}
+              });
+            case '/share/init':
+              return response({});
+            case '/share/verify':
+              return response({'errno': 0, 'randsk': 'browser-key'});
+            case '/s/1fixture':
+              return http.Response(
+                  '<script>locals.mset({"shareid":42,"uk":17,"bdstoken":"browser-csrf"});</script>',
+                  200);
+            case '/api/sharedownload':
+              downloads++;
+              expect(downloads, 1,
+                  reason: 'No WX download without its signature');
+              expect(request.url.queryParameters['sign'], 'browser-sign');
+              expect(request.url.queryParameters['timestamp'], '2');
+              expect(request.url.queryParameters['clienttype'], '0');
+              if (outcome == 'browserDownload9019') {
+                return response({'errno': 9019});
+              }
+              return response({
+                'errno': 0,
+                'list': [
+                  {'fs_id': 1, 'dlink': 'https://d.pcs.baidu.com/file'}
+                ]
+              });
+            default:
+              fail('Unexpected endpoint');
+          }
+        });
+        final pending = parser.resolve(parser.match(shareUrl)!,
+            const NetdiskFile(fileId: '1', name: 'sample.bin', size: 8),
+            credential: authenticated
+                ? const NetdiskCredential(cookie: 'BDUSS=fixture-account')
+                : const NetdiskCredential.none());
+        if (outcome == 'success') {
+          expect((await pending).url, 'https://d.pcs.baidu.com/file');
+        } else {
+          final stage = outcome == 'browserSignature9019'
+              ? 'tplconfig'
+              : 'websharedownload';
+          await expectLater(
+              pending,
+              throwsA(isA<NetdiskException>()
+                  .having((e) => e.code, 'code',
+                      NetdiskErrorCode.verificationRequired)
+                  .having(
+                      (e) => e.detail, 'stage', 'stage=$stage errno=9019')));
+        }
+        expect(signatures, 2);
+        expect(downloads, outcome == 'browserSignature9019' ? 0 : 1);
+        expect(
+            requests.where((r) => r.url.path == '/share/init'), hasLength(1));
+        expect(
+            requests.where((r) => r.url.path == '/share/verify'), hasLength(1));
+        expect(
+            requests.where((r) => r.url.path == '/s/1fixture'), hasLength(1));
+      });
+    }
+  }
+  test('share page HTTP failure is explicit and does not start JSON fallback',
+      () async {
+    final requests = <http.Request>[];
+    final parser = parserFor((request) async {
+      requests.add(request);
+      switch (request.url.path) {
+        case '/share/wxlist':
+          return listing([item(1)]);
+        case '/share/tplconfig':
+          return response({
+            'errno': 0,
+            'data': {'sign': 'wx', 'timestamp': 1}
+          });
+        case '/api/sharedownload':
+          return response({'errno': 9019});
+        case '/share/init':
+          return response({});
+        case '/share/verify':
+          return response({'errno': 0, 'randsk': 'key'});
+        case '/s/1fixture':
+          return http.Response('unavailable', 503);
+        default:
+          fail('Unexpected endpoint');
+      }
+    });
+    await expectLater(
+        parser.resolve(parser.match(shareUrl)!,
+            const NetdiskFile(fileId: '1', name: 'sample.bin', size: 8)),
+        throwsA(isA<NetdiskException>()
+            .having((e) => e.statusCode, 'http', 503)
+            .having(
+                (e) => e.detail, 'stage', 'stage=sharepage errno=unknown')));
+    expect(
+        requests.where((r) => r.url.path == '/rest/2.0/xpan/share'), isEmpty);
+  });
+  for (final authenticated in [false, true]) {
+    test('unknown HTML uses bounded xpan context, authenticated=$authenticated',
+        () async {
+      final requests = <http.Request>[];
+      var downloads = 0;
+      var signatures = 0;
+      final parser = parserFor((request) async {
+        requests.add(request);
+        expect(request.url.host, 'pan.baidu.com');
+        expect(request.url.path, isNot(contains('transfer')));
+        switch (request.url.path) {
+          case '/share/wxlist':
+            return listing([item(1)]);
+          case '/share/tplconfig':
+            signatures++;
+            expect(request.headers['User-Agent'],
+                signatures == 1 ? 'netdisk' : contains('Mozilla'));
+            return response({
+              'errno': 0,
+              'data': {
+                'sign': signatures == 1 ? 'wx-sign' : 'browser-sign',
+                'timestamp': signatures
+              }
+            });
+          case '/share/init':
+            expect(request.headers['Cookie'] ?? '', isNot(contains('BDCLND')));
+            return response({});
+          case '/share/verify':
+            expect(
+                request.headers['Cookie'] ?? '', isNot(contains('old-share')));
+            return response({'errno': 0, 'randsk': 'current/share+'});
+          case '/s/1fixture':
+            return http.Response('<html>new page layout</html>', 200);
+          case '/rest/2.0/xpan/share':
+            expect(request.url.queryParameters, {
+              'method': 'list',
+              'shorturl': 'fixture',
+              'root': '1',
+              'dir': '/',
+              'page': '1',
+              'num': '100',
+              'sekey': 'current/share+'
+            });
+            expect(request.headers['Cookie'],
+                contains('BDCLND=current%2Fshare%2B'));
+            return response({
+              'errno': 0,
+              'share_id': '42',
+              'uk': 17,
+              'list': [item(1)],
+              'sign': 'must-not-reuse'
+            });
+          case '/api/gettemplatevariable':
+            expect(authenticated, true);
+            expect(request.url.queryParameters['fields'], '["bdstoken"]');
+            return response({
+              'errno': 0,
+              'result': {'bdstoken': 'fresh-token'}
+            });
+          case '/api/sharedownload':
+            downloads++;
+            if (downloads == 1) return response({'errno': 9019});
+            expect(downloads, 2);
+            expect(request.url.queryParameters['sign'], 'browser-sign');
+            expect(request.url.queryParameters['clienttype'], '0');
+            expect(request.url.queryParameters['bdstoken'],
+                authenticated ? 'fresh-token' : isNull);
+            expect(request.bodyFields['primaryid'], '42');
+            expect(request.bodyFields['uk'], '17');
+            return response({
+              'errno': 0,
+              'list': [
+                {'fs_id': 1, 'dlink': 'https://d.pcs.baidu.com/file'}
+              ]
+            });
+          default:
+            fail('Unexpected endpoint');
+        }
+      });
+      final credential = authenticated
+          ? const NetdiskCredential(cookie: 'BDUSS=account; BDCLND=old-share')
+          : const NetdiskCredential(cookie: 'BDCLND=old-share');
+      final direct = await parser.resolve(parser.match(shareUrl)!,
+          const NetdiskFile(fileId: '1', name: 'sample.bin', size: 8),
+          credential: credential);
+      expect(direct.url, 'https://d.pcs.baidu.com/file');
+      expect(downloads, 2);
+      expect(signatures, 2);
+      expect(requests.where((r) => r.url.path == '/rest/2.0/xpan/share'),
+          hasLength(1));
+      expect(requests.where((r) => r.url.path == '/api/gettemplatevariable'),
+          hasLength(authenticated ? 1 : 0));
+      expect(credential.cookie, contains('BDCLND=old-share'));
+    });
+  }
+
+  for (final payload in <Map<String, Object?>>[
+    {'errno': 0, 'uk': 17, 'list': []},
+    {'errno': 0, 'share_id': 42, 'list': []},
+    {'errno': 0, 'share_id': 42, 'uk': 17},
+    {'errno': 0, 'share_id': 42, 'uk': 17, 'list': {}},
+    {'errno': 0, 'share_id': 'private-id', 'uk': 17, 'list': []},
+    {'errno': 0, 'share_id': 42, 'uk': 17.5, 'list': []},
+  ]) {
+    test('malformed xpan context stops without a second download: $payload',
+        () async {
+      var downloads = 0;
+      final parser = parserFor((request) async {
+        switch (request.url.path) {
+          case '/share/wxlist':
+            return listing([item(1)]);
+          case '/share/tplconfig':
+            return response({
+              'errno': 0,
+              'data': {'sign': 'wx', 'timestamp': 1}
+            });
+          case '/api/sharedownload':
+            downloads++;
+            return response({'errno': 9019});
+          case '/share/init':
+            return response({});
+          case '/share/verify':
+            return response({'errno': 0, 'randsk': 'key'});
+          case '/s/1fixture':
+            return http.Response('<html>unknown</html>', 200);
+          case '/rest/2.0/xpan/share':
+            return response(payload);
+          default:
+            fail('Unexpected endpoint');
+        }
+      });
+      await expectLater(
+          parser.resolve(parser.match(shareUrl)!,
+              const NetdiskFile(fileId: '1', name: 'sample.bin', size: 8)),
+          throwsA(isA<NetdiskException>()
+              .having((e) => e.code, 'code', NetdiskErrorCode.badResponse)
+              .having((e) => e.detail, 'stage', 'stage=xpanshare errno=0')
+              .having((e) => e.toString(), 'redacted',
+                  isNot(contains('private-id')))));
+      expect(downloads, 1);
+    });
+  }
+
+  for (final errno in [-6, 112, 9019]) {
+    test('account token errno=$errno retains precise meaning and stops',
+        () async {
+      var downloads = 0;
+      var tokens = 0;
+      final parser = parserFor((request) async {
+        switch (request.url.path) {
+          case '/share/wxlist':
+            return listing([item(1)]);
+          case '/share/tplconfig':
+            return response({
+              'errno': 0,
+              'data': {'sign': 'wx', 'timestamp': 1}
+            });
+          case '/api/sharedownload':
+            downloads++;
+            return response({'errno': 9019});
+          case '/share/init':
+            return response({});
+          case '/share/verify':
+            return response({'errno': 0, 'randsk': 'key'});
+          case '/s/1fixture':
+            return http.Response(
+                '<script>locals.mset({"shareid":42,"uk":17,"sign":"web","timestamp":2});</script>',
+                200);
+          case '/api/gettemplatevariable':
+            tokens++;
+            return response({'errno': errno});
+          default:
+            fail('Unexpected endpoint');
+        }
+      });
+      await expectLater(
+          parser.resolve(parser.match(shareUrl)!,
+              const NetdiskFile(fileId: '1', name: 'sample.bin', size: 8),
+              credential: const NetdiskCredential(cookie: 'BDUSS=account')),
+          throwsA(isA<NetdiskException>()
+              .having(
+                  (e) => e.code,
+                  'code',
+                  errno == 9019
+                      ? NetdiskErrorCode.verificationRequired
+                      : NetdiskErrorCode.credentialExpired)
+              .having(
+                  (e) => e.detail, 'stage', 'stage=bdstoken errno=$errno')));
+      expect(downloads, 1);
+      expect(tokens, 1);
+    });
+  }
+
+  test('public xpan context never inherits another share key', () async {
+    var downloads = 0;
+    final parser = parserFor((request) async {
+      switch (request.url.path) {
+        case '/share/wxlist':
+          return listing([item(1)]);
+        case '/share/tplconfig':
+          return response({
+            'errno': 0,
+            'data': {'sign': 'sign', 'timestamp': 1}
+          });
+        case '/api/sharedownload':
+          downloads++;
+          if (downloads == 1) return response({'errno': 9019});
+          expect(request.bodyFields['extra'], isNull);
+          return response({
+            'errno': 0,
+            'list': [
+              {'dlink': 'https://d.pcs.baidu.com/public'}
+            ]
+          });
+        case '/share/init':
+          return response({});
+        case '/s/1fixture':
+          return http.Response('<html>unknown</html>', 200);
+        case '/rest/2.0/xpan/share':
+          expect(request.url.queryParameters['sekey'], isNull);
+          expect(request.headers['Cookie'] ?? '', isNot(contains('BDCLND')));
+          return response({'errno': 0, 'share_id': 42, 'uk': 17, 'list': []});
+        default:
+          fail('Unexpected endpoint');
+      }
+    });
+    await parser.resolve(parser.match('https://pan.baidu.com/s/1fixture')!,
+        const NetdiskFile(fileId: '1', name: 'sample.bin', size: 8),
+        credential: const NetdiskCredential(cookie: 'BDCLND=unrelated-share'));
+    expect(downloads, 2);
+  });
   test('matches only real supported hosts and personal share paths', () {
     final parser = parserFor((_) async => response({}));
     expect(parser.match('https://evilbaidu.com/s/1fixture'), isNull);
@@ -195,6 +557,11 @@ void main() {
             return http.Response(
                 '<script>yunData.setData({"shareid":42,"uk":17,"sign":"web-sign","timestamp":1});</script>',
                 200);
+          case '/api/gettemplatevariable':
+            return response({
+              'errno': 0,
+              'result': {'bdstoken': 'browser-csrf'}
+            });
           case '/api/sharedownload':
             expect(jsonDecode(request.bodyFields['extra']!), {
               'sekey': request.url.queryParameters['clienttype'] == '12'
@@ -213,9 +580,7 @@ void main() {
               credential: authenticated
                   ? const NetdiskCredential(cookie: 'BDUSS=fixture')
                   : const NetdiskCredential.none()),
-          throwsA(errorCode(authenticated
-              ? NetdiskErrorCode.verificationRequired
-              : NetdiskErrorCode.loginRequired)));
+          throwsA(errorCode(NetdiskErrorCode.verificationRequired)));
     });
   }
 
@@ -416,7 +781,7 @@ void main() {
             cookie: 'BDUSS=fixture-account; BDCLND=older%2Fkey'));
     expect(direct.url, 'https://cdn.example.test/file');
   });
-  for (final stage in ['wxlist', 'tplconfig']) {
+  for (final stage in ['wxlist']) {
     test('9019 identifies $stage without assuming a nonempty BDUSS expired',
         () async {
       final parser = parserFor((request) async {
@@ -503,6 +868,9 @@ void main() {
                       'sekey': 'older-page-key',
                     })});</script>',
                 200);
+          case '/rest/2.0/xpan/share':
+            expect(outcome, 'pageUnknown');
+            return response({'errno': 9019});
           case '/api/sharedownload':
             downloads++;
             if (downloads == 1) {
@@ -545,7 +913,7 @@ void main() {
         expect(direct.headers['Cookie'], isNull);
       } else {
         final stage = outcome == 'pageUnknown'
-            ? 'sharedownload'
+            ? 'xpanshare'
             : outcome == 'pageCaptcha'
                 ? 'sharepage'
                 : outcome == 'verify9019'
@@ -579,25 +947,47 @@ void main() {
     });
   }
 
-  test('anonymous 9019 never starts an official logged-in fallback', () async {
+  test('anonymous 9019 tries the browser once and remains verificationRequired',
+      () async {
     final requests = <http.Request>[];
+    var downloads = 0;
     final parser = parserFor((request) async {
       requests.add(request);
-      if (request.url.path == '/share/wxlist') return listing([item(1)]);
-      if (request.url.path == '/share/tplconfig') {
-        return response({
-          'errno': 0,
-          'data': {'sign': 'wx-sign', 'timestamp': 1}
-        });
+      switch (request.url.path) {
+        case '/share/wxlist':
+          return listing([item(1)]);
+        case '/share/tplconfig':
+          return response({
+            'errno': 0,
+            'data': {'sign': 'wx-sign', 'timestamp': 1}
+          });
+        case '/share/init':
+          return response({});
+        case '/share/verify':
+          return response({'errno': 0, 'randsk': 'browser-key'});
+        case '/s/1fixture':
+          return http.Response(
+              '<script>locals.mset({"shareid":42,"uk":17,"sign":"web-sign","timestamp":2});</script>',
+              200);
+        case '/api/sharedownload':
+          downloads++;
+          if (downloads == 2) {
+            expect(request.url.queryParameters['bdstoken'], isNull);
+            expect(request.url.queryParameters['clienttype'], '0');
+          }
+          return response({'errno': 9019});
+        default:
+          fail('Unexpected endpoint');
       }
-      expect(request.url.path, '/api/sharedownload');
-      return response({'errno': 9019});
     });
     await expectLater(
         parser.resolve(parser.match(shareUrl)!,
             const NetdiskFile(fileId: '1', name: 'sample.bin', size: 8)),
-        throwsA(errorCode(NetdiskErrorCode.loginRequired)));
-    expect(requests, hasLength(3));
+        throwsA(errorCode(NetdiskErrorCode.verificationRequired)));
+    expect(downloads, 2);
+    expect(requests, hasLength(7));
+    expect(requests.where((r) => r.url.path == '/api/gettemplatevariable'),
+        isEmpty);
   });
   test(
       'WX isolates the minimal BDUSS and empty ndut_fmt session from browser cookies',
@@ -636,8 +1026,7 @@ void main() {
     expect(credential.cookie, browserCookies);
   });
 
-  test(
-      'an unknown share page reports a safe sharepage stage without echoing HTML',
+  test('an unknown page tries JSON once and safely reports malformed context',
       () async {
     final parser = parserFor((request) async {
       switch (request.url.path) {
@@ -649,6 +1038,8 @@ void main() {
           return response({'errno': 0, 'randsk': 'fixture-key'});
         case '/s/1fixture':
           return http.Response('<html>private-page-content</html>', 200);
+        case '/rest/2.0/xpan/share':
+          return response({'errno': 0, 'private': 'private-page-content'});
         default:
           fail('Unexpected endpoint');
       }
@@ -657,7 +1048,7 @@ void main() {
         parser.parse(parser.match(shareUrl)!),
         throwsA(isA<NetdiskException>()
             .having((e) => e.code, 'code', NetdiskErrorCode.badResponse)
-            .having((e) => e.detail, 'detail', 'stage=sharepage errno=unknown')
+            .having((e) => e.detail, 'detail', 'stage=xpanshare errno=0')
             .having((e) => e.toString(), 'redacted',
                 isNot(contains('private-page-content')))));
   });

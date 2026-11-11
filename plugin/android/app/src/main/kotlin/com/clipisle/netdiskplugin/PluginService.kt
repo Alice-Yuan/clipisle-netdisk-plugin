@@ -65,6 +65,8 @@ class PluginService : Service() {
    try { when(call.method) {
     "ready" -> { ready=true; pending.toList().also { pending.clear() }.forEach { it() }; result.success(null) }
     "read" -> result.success(store.read(call.argument<String>("key")!!))
+    "compareAndSetCredential" -> result.success(store.compareAndSet(
+     call.argument<String>("key")!!,call.argument<String>("expected")!!,call.argument<String>("value")!!))
     "write" -> {
      val key=call.argument<String>("key")!!; val value=call.argument<String>("value")
      store.write(key,value)

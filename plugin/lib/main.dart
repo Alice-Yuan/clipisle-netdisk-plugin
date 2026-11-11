@@ -13,6 +13,10 @@ void main() {
     read: (key) => runtime.invokeMethod<String>('read', {'key': key}),
     write: (key, value) =>
         runtime.invokeMethod<void>('write', {'key': key, 'value': value}),
+    compareAndSet: (key, expected, value) async =>
+        await runtime.invokeMethod<bool>('compareAndSetCredential',
+            {'key': key, 'expected': expected, 'value': value}) ??
+        false,
   );
   runtime.setMethodCallHandler((call) async {
     if (call.method != 'invoke') throw MissingPluginException();
@@ -29,16 +33,45 @@ void main() {
 
 typedef PrivateRead = Future<String?> Function(String key);
 typedef PrivateWrite = Future<void> Function(String key, String? value);
+typedef PrivateCompareAndSet = Future<bool> Function(
+    String key, String expected, String value);
 
 class NetdiskPlugin {
   NetdiskPlugin(
       {required this.read,
       required this.write,
+      this.compareAndSet,
       NetdiskClient Function()? clientFactory})
-      : clientFactory = clientFactory ?? NetdiskClient.new;
+      : _customClientFactory = clientFactory;
   final PrivateRead read;
   final PrivateWrite write;
-  final NetdiskClient Function() clientFactory;
+  final PrivateCompareAndSet? compareAndSet;
+  final NetdiskClient Function()? _customClientFactory;
+  NetdiskClient _createClient() =>
+      _customClientFactory?.call() ??
+      NetdiskClient(onCredentialUpdated: persistCredentialUpdate);
+
+  // Native CAS is atomic across login Activity, logout and concurrent requests.
+  // If no atomic store is supplied, retain operation-local cookies only.
+  Future<void> persistCredentialUpdate(NetdiskPlatform platform,
+      NetdiskCredential before, NetdiskCredential after) async {
+    final expected = before.cookie;
+    final value = after.cookie;
+    if (expected == null ||
+        expected.isEmpty ||
+        value == null ||
+        value == expected) {
+      return;
+    }
+    await compareAndSet?.call('credential.${platform.id}', expected, value);
+  }
+
+  static bool _hasLogin(NetdiskPlatform platform, String? raw) {
+    final credential = NetdiskCredential(cookie: raw);
+    final name = platform == NetdiskPlatform.baidu ? 'BDUSS' : '__puus';
+    return (credential.cookieValue(name) ?? '').isNotEmpty;
+  }
+
   final _active = <String, NetdiskClient>{};
   final _canceled = <String>{};
   final _sessions = <String, ({ParsedShareLink link, NetdiskShare share})>{};
@@ -123,10 +156,32 @@ class NetdiskPlugin {
   Future<NetdiskCredential> _credential(NetdiskPlatform platform) async =>
       NetdiskCredential(cookie: await read('credential.${platform.id}'));
 
+  Future<T> _withDownloadIdentity<T>(NetdiskPlatform platform,
+      Future<T> Function(NetdiskCredential credential) request) async {
+    if (platform != NetdiskPlatform.baidu) {
+      return request(await _credential(platform));
+    }
+    try {
+      return await request(const NetdiskCredential.none());
+    } on NetdiskException catch (error) {
+      if (!{
+        NetdiskErrorCode.loginRequired,
+        NetdiskErrorCode.credentialExpired,
+        NetdiskErrorCode.verificationRequired,
+        NetdiskErrorCode.sizeLimitExceeded
+      }.contains(error.code)) {
+        rethrow;
+      }
+      final saved = await _credential(platform);
+      if (!_hasLogin(platform, saved.cookie)) rethrow;
+      return request(saved);
+    }
+  }
+
   Future<Map<String, dynamic>> _settings() async {
     final rows = <Map<String, dynamic>>[];
     for (final p in [NetdiskPlatform.baidu, NetdiskPlatform.quark]) {
-      final logged = (await read('credential.${p.id}'))?.isNotEmpty == true;
+      final logged = _hasLogin(p, await read('credential.${p.id}'));
       final suffix = p == NetdiskPlatform.baidu ? 'Baidu' : 'Quark';
       rows.add({
         'id': 'account.${p.id}',
@@ -176,7 +231,7 @@ class NetdiskPlugin {
     if (_canceled.contains(id)) {
       throw const NetdiskException(NetdiskErrorCode.network, '已取消');
     }
-    final client = clientFactory();
+    final client = _createClient();
     _active[id] = client;
     try {
       final result = await work(client);
@@ -212,8 +267,8 @@ class NetdiskPlugin {
         }
         NetdiskShare share;
         try {
-          share = await client.parseLink(link,
-              credential: await _credential(link.platform));
+          share = await _withDownloadIdentity(link.platform,
+              (credential) => client.parseLink(link, credential: credential));
         } on NetdiskException catch (e) {
           return _recovery(e, input, link.platform);
         }
@@ -300,14 +355,8 @@ class NetdiskPlugin {
         .toList();
     if (files.isEmpty) return {'ok': false, 'message': '请至少选择一个文件'};
     if (files.length > 500) return {'ok': false, 'message': '一次最多添加 500 个文件'};
-    // Login is checked before enqueue, not after a task has already failed.
-    final credential = await _credential(session.link.platform);
-    if (session.link.platform == NetdiskPlatform.baidu && credential.isEmpty) {
-      return _recovery(
-          const NetdiskException(NetdiskErrorCode.loginRequired, ''),
-          '${session.link.rawUrl} 提取码: ${session.link.password ?? ''}',
-          session.link.platform);
-    }
+    // Public shares must be attempted without a mandatory account gate.
+    // The provider response determines whether sign-in or verification is needed.
     final downloads = <Map<String, dynamic>>[];
     for (final file in files) {
       final id = sha256
@@ -361,8 +410,10 @@ class NetdiskPlugin {
             extra: Map<String, Object?>.from(f['extra'] as Map));
         NetdiskDownloadLink direct;
         try {
-          direct = await client.resolveDownloadFrom(link, file,
-              credential: await _credential(platform));
+          direct = await _withDownloadIdentity(
+              platform,
+              (credential) => client.resolveDownloadFrom(link, file,
+                  credential: credential));
           if (platform == NetdiskPlatform.baidu) {
             await write('verification.baidu', null);
           }

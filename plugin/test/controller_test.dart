@@ -46,6 +46,8 @@ class FakeNetdiskClient implements NetdiskClient {
   NetdiskFile? resolvedFile;
   NetdiskCredential? parsedCredential;
   NetdiskCredential? resolvedCredential;
+  final parsedCredentials = <NetdiskCredential>[];
+  final resolvedCredentials = <NetdiskCredential>[];
   int closeCount = 0;
   @override
   ParsedShareLink detect(String input) {
@@ -60,6 +62,7 @@ class FakeNetdiskClient implements NetdiskClient {
   }) async {
     parsedLink = link;
     parsedCredential = credential;
+    parsedCredentials.add(credential);
     return onParse == null ? share : await onParse!();
   }
 
@@ -72,6 +75,7 @@ class FakeNetdiskClient implements NetdiskClient {
     resolvedLink = link;
     resolvedFile = file;
     resolvedCredential = credential;
+    resolvedCredentials.add(credential);
     return onResolve == null
         ? const NetdiskDownloadLink(
             platform: NetdiskPlatform.quark,
@@ -238,6 +242,247 @@ Future<String> selectedResource(NetdiskPlugin plugin) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  const baiduAccount = 'BDUSS=private-baidu-account; STOKEN=private-token';
+  const baiduDirect = NetdiskDownloadLink(
+      platform: NetdiskPlatform.baidu,
+      url: 'https://cdn.baidupcs.com/public-fixture',
+      fileName: 'sample.bin',
+      size: 8);
+
+  Fixture baiduIdentity(
+      {String? cookie = baiduAccount,
+      void Function(FakeNetdiskClient)? configure}) {
+    final fixture = baiduVerificationFixture(() async => baiduDirect);
+    fixture.saved.remove('credential.baidu');
+    if (cookie != null) fixture.saved['credential.baidu'] = cookie;
+    final original = fixture.configure!;
+    fixture.configure = (client) {
+      original(client);
+      configure?.call(client);
+    };
+    return fixture;
+  }
+
+  test(
+      'Baidu saved account is not sent when anonymous parse and resolve succeed',
+      () async {
+    final fixture = baiduIdentity();
+    final plugin = fixture.controller();
+    final resource = await selectedResource(plugin);
+    expect(
+        fixture.clients.single.parsedCredentials.map((value) => value.isEmpty),
+        [true]);
+    expect(fixture.clients.single.parsedCredentials.single.cookie, isNull);
+    final result =
+        await plugin.invoke('resolveDownload', {'resourceId': resource});
+    expect(result['ok'], true);
+    expect(
+        fixture.clients.last.resolvedCredentials.map((value) => value.isEmpty),
+        [true]);
+    expect(fixture.clients.last.resolvedCredentials.single.cookie, isNull);
+    expect(fixture.saved['credential.baidu'], baiduAccount);
+    expect(jsonEncode(result), isNot(contains('private-baidu-account')));
+    expect(fixture.clients.every((client) => client.closeCount == 1), true);
+  });
+
+  for (final code in [
+    NetdiskErrorCode.loginRequired,
+    NetdiskErrorCode.credentialExpired,
+    NetdiskErrorCode.verificationRequired,
+    NetdiskErrorCode.sizeLimitExceeded
+  ]) {
+    test(
+        'Baidu $code permits one saved-account fallback for both parse and resolve',
+        () async {
+      final fixture = baiduIdentity(configure: (client) {
+        client.onParse = () async {
+          if (client.parsedCredential!.isEmpty) {
+            throw NetdiskException(code, 'anonymous denied');
+          }
+          return client.share;
+        };
+        client.onResolve = () async {
+          if (client.resolvedCredential!.isEmpty) {
+            throw NetdiskException(code, 'anonymous denied');
+          }
+          return baiduDirect;
+        };
+      });
+      final plugin = fixture.controller();
+      final resource = await selectedResource(plugin);
+      expect(
+          fixture.clients.single.parsedCredentials.map((value) => value.cookie),
+          [null, baiduAccount]);
+      final result =
+          await plugin.invoke('resolveDownload', {'resourceId': resource});
+      expect(result['ok'], true);
+      expect(
+          fixture.clients.last.resolvedCredentials.map((value) => value.cookie),
+          [null, baiduAccount]);
+      expect(fixture.clients, hasLength(2));
+      expect(fixture.clients.every((client) => client.closeCount == 1), true);
+      expect(result.containsKey('requestUi'), false);
+      expect(fixture.saved.containsKey('verification.baidu'), false);
+    });
+
+    test('Baidu $code fallback failure stops after the second request',
+        () async {
+      final fixture = baiduIdentity(configure: (client) {
+        client.onResolve =
+            () async => throw NetdiskException(code, 'always denied');
+      });
+      final plugin = fixture.controller();
+      final resource = await selectedResource(plugin);
+      final result =
+          await plugin.invoke('resolveDownload', {'resourceId': resource});
+      expect(result['ok'], false);
+      expect(result['code'], code.name);
+      expect(result.containsKey('requestUi'), false);
+      expect(
+          fixture.clients.last.resolvedCredentials.map((value) => value.cookie),
+          [null, baiduAccount]);
+      expect(fixture.clients.last.closeCount, 1);
+    });
+  }
+
+  for (final code in [
+    NetdiskErrorCode.network,
+    NetdiskErrorCode.passwordWrong,
+    NetdiskErrorCode.passwordRequired
+  ]) {
+    test('Baidu anonymous $code resolution never retries with a saved account',
+        () async {
+      final fixture = baiduIdentity(configure: (client) {
+        client.onResolve = () async =>
+            throw NetdiskException(code, 'private-provider-message');
+      });
+      final plugin = fixture.controller();
+      final resource = await selectedResource(plugin);
+      final result =
+          await plugin.invoke('resolveDownload', {'resourceId': resource});
+      expect(result['ok'], false);
+      expect(result['code'], code.name);
+      expect(result.containsKey('requestUi'), false);
+      expect(
+          fixture.clients.last.resolvedCredentials.map((value) => value.cookie),
+          [null]);
+      expect(fixture.clients.last.closeCount, 1);
+      expect(fixture.saved.containsKey('verification.baidu'), false);
+    });
+
+    test(
+        'Baidu anonymous $code parse returns the correct recovery without account retry',
+        () async {
+      final fixture = baiduIdentity(configure: (client) {
+        client.onParse = () async =>
+            throw NetdiskException(code, 'private-provider-message');
+      });
+      final result = await fixture
+          .controller()
+          .invoke('parseInput', {'input': verificationUrl});
+      expect(result['ok'], true);
+      expect((result['page'] as Map)['id'], 'recover-baidu');
+      expect(result.containsKey('requestUi'), false);
+      final fields = ((result['page'] as Map)['fields'] as List).cast<Map>();
+      expect(fields.singleWhere((field) => field['id'] == 'input')['value'],
+          verificationUrl);
+      expect(fields.any((field) => field['id'] == 'password'),
+          code != NetdiskErrorCode.network);
+      expect(pageActions(result).map((action) => action['id']), ['parseInput']);
+      expect(
+          fixture.clients.single.parsedCredentials.map((value) => value.cookie),
+          [null]);
+      expect(fixture.clients.single.closeCount, 1);
+      expect(jsonEncode(result), isNot(contains('private-provider-message')));
+    });
+  }
+
+  test(
+      'Baidu anonymous size restriction without BDUSS neither retries nor launches sign-in',
+      () async {
+    for (final cookie in <String?>[null, 'BDUSS=', 'STOKEN=only-token']) {
+      final fixture = baiduIdentity(
+          cookie: cookie,
+          configure: (client) {
+            client.onResolve = () async => throw const NetdiskException(
+                NetdiskErrorCode.sizeLimitExceeded, 'anonymous browser limit');
+          });
+      final plugin = fixture.controller();
+      final resource = await selectedResource(plugin);
+      final result =
+          await plugin.invoke('resolveDownload', {'resourceId': resource});
+      expect(result['ok'], false);
+      expect(result['code'], 'sizeLimitExceeded');
+      expect(result.containsKey('requestUi'), false);
+      expect(result.containsKey('download'), false);
+      expect(
+          fixture.clients.last.resolvedCredentials.map((value) => value.cookie),
+          [null]);
+      expect(fixture.clients.last.closeCount, 1);
+      expect(fixture.saved.containsKey('verification.baidu'), false);
+    }
+  });
+
+  for (final cookie in <String?>[
+    null,
+    '',
+    'BDUSS=; STOKEN=only-token',
+    'NOTBDUSS=invalid; STOKEN=only-token'
+  ]) {
+    test(
+        'Baidu verification without a valid saved BDUSS never forces login: $cookie',
+        () async {
+      final fixture = baiduIdentity(
+          cookie: cookie,
+          configure: (client) {
+            client.onResolve = () async => throw const NetdiskException(
+                NetdiskErrorCode.verificationRequired, 'verification needed');
+          });
+      final plugin = fixture.controller();
+      final resource = await selectedResource(plugin);
+      final result =
+          await plugin.invoke('resolveDownload', {'resourceId': resource});
+      expect(result['ok'], false);
+      expect(result['code'], 'verificationRequired');
+      expect(result.containsKey('requestUi'), false);
+      expect(result.containsKey('download'), false);
+      expect(
+          fixture.clients.last.resolvedCredentials.map((value) => value.cookie),
+          [null]);
+      expect(fixture.clients.last.closeCount, 1);
+    });
+  }
+
+  for (final code in [
+    NetdiskErrorCode.loginRequired,
+    NetdiskErrorCode.credentialExpired,
+    NetdiskErrorCode.verificationRequired
+  ]) {
+    test(
+        'Baidu no-account parse $code offers explicit recovery without launching login',
+        () async {
+      final fixture = baiduIdentity(
+          cookie: null,
+          configure: (client) {
+            client.onParse =
+                () async => throw NetdiskException(code, 'guest denied');
+          });
+      final result = await fixture
+          .controller()
+          .invoke('parseInput', {'input': verificationUrl});
+      expect(result['ok'], true);
+      expect(result.containsKey('requestUi'), false);
+      expect((result['page'] as Map)['id'], 'recover-baidu');
+      final ids = pageActions(result).map((action) => action['id']);
+      expect(ids, contains('parseInput'));
+      expect(ids.contains('loginBaidu'),
+          code != NetdiskErrorCode.verificationRequired);
+      expect(
+          fixture.clients.single.parsedCredentials.map((value) => value.cookie),
+          [null]);
+    });
+  }
 
   test('parse exposes selection metadata without private parser state',
       () async {
@@ -426,7 +671,8 @@ void main() {
     expect(fixture.clients.last.parsedLink?.password, 'fixed');
   });
 
-  test('Baidu login recovery occurs before enqueue and can resume parsing',
+  test(
+      'Baidu can enqueue and resolve an anonymous share without forced sign-in',
       () async {
     final fixture = Fixture()
       ..configure = (client) {
@@ -439,34 +685,28 @@ void main() {
             platform: NetdiskPlatform.baidu,
             shareId: '1fixture',
             files: [firstFile]);
+        client.onResolve = () async => const NetdiskDownloadLink(
+            platform: NetdiskPlatform.baidu,
+            url: 'https://cdn.baidupcs.com/fixture',
+            fileName: 'sample.bin',
+            size: 8);
       };
     final plugin = fixture.controller();
     final sid = await parseSession(plugin);
-    final recovery = await plugin.invoke('prepareDownloads', {
-      'sessionId': sid,
-      'selectedIds': ['file-1']
-    });
-    expect(recovery['ok'], true);
-    expect(pageActions(recovery).any((a) => a['id'] == 'loginBaidu'), true);
-    expect(fixture.saved, isEmpty);
-    final fields = ((recovery['page'] as Map)['fields'] as List).cast<Map>();
-    final recoveryInput =
-        fields.singleWhere((f) => f['id'] == 'input')['value'];
-    final login = await plugin.invoke('loginBaidu', {
-      'values': {'input': recoveryInput}
-    });
-    expect((login['requestUi'] as Map)['resultAction'], 'parseInput');
-    fixture.saved['credential.baidu'] = 'BDUSS=fixture-account';
-    final parsed = await plugin.invoke('parseInput', {'input': recoveryInput});
-    expect(parsed['ok'], true);
-    expect(
-        fixture.clients.last.parsedCredential?.cookie, 'BDUSS=fixture-account');
     final prepared = await plugin.invoke('prepareDownloads', {
-      'sessionId': sessionId(parsed),
+      'sessionId': sid,
       'selectedIds': ['file-1'],
     });
     expect(prepared['ok'], true);
-    expect(jsonEncode(prepared), isNot(contains('BDUSS=')));
+    expect(prepared.containsKey('requestUi'), false);
+    expect(prepared.containsKey('page'), false);
+    final downloads = (prepared['downloads'] as List).cast<Map>();
+    expect(downloads, hasLength(1));
+    final result = await plugin.invoke('resolveDownload', {
+      'resourceId': downloads.single['resourceId'],
+    });
+    expect(result['ok'], true);
+    expect(fixture.clients.last.resolvedCredential!.isEmpty, true);
   });
 
   test('recovery form input takes precedence over the original host arguments',

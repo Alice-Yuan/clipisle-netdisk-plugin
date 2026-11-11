@@ -1,3 +1,5 @@
+import 'dart:async';
+
 /// 三个平台的身份标识。
 enum NetdiskPlatform {
   baidu('百度网盘', 'baidu', 'pan.baidu.com'),
@@ -10,6 +12,14 @@ enum NetdiskPlatform {
   final String id;
   final String homeHost;
 }
+
+/// 登录会话更新通知。接收方应仅在当前凭据仍等于 [before] 时保存 [after]，
+/// 避免并发响应覆盖用户的新登录；通知失败不会影响解析或下载。
+typedef CredentialUpdatedCallback = FutureOr<void> Function(
+  NetdiskPlatform platform,
+  NetdiskCredential before,
+  NetdiskCredential after,
+);
 
 /// 账号凭证。三者都允许为空，此时走免登录路径（能力受限，见各平台注释）。
 class NetdiskCredential {

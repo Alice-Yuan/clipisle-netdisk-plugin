@@ -4,7 +4,7 @@
   "id": "com.clipisle.netdisk",
   "name": "网盘下载",
   "description": "百度网盘 · 夸克网盘",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "packageName": "com.clipisle.netdiskplugin",
   "source": "https://github.com/Alice-Yuan/clipisle-netdisk-plugin",
   "category": "platform",

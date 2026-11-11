@@ -2,19 +2,19 @@
 
 网盘分享目录解析、下载链接获取与 HTTP 下载。根目录是纯 Dart 库；`plugin/` 是单独安装的 ClipIsle Android 插件，支持百度网盘和夸克网盘。阿里云盘仅保留为库中的 experimental 实现。
 
-当前插件版本为 `0.1.1`。公开仓库已创建：[Alice-Yuan/clipisle-netdisk-plugin](https://github.com/Alice-Yuan/clipisle-netdisk-plugin)。安装包与插件清单见 [v0.1.1 Release](https://github.com/Alice-Yuan/clipisle-netdisk-plugin/releases/tag/v0.1.1)。
+当前插件版本为 `0.1.2`。公开仓库已创建：[Alice-Yuan/clipisle-netdisk-plugin](https://github.com/Alice-Yuan/clipisle-netdisk-plugin)。安装包与插件清单见 [v0.1.2 Release](https://github.com/Alice-Yuan/clipisle-netdisk-plugin/releases/tag/v0.1.2)。
 
 ## 安装
 
 更新 ClipIsle 宿主后，在「插件 → 从 GitHub 添加」输入 `Alice-Yuan/clipisle-netdisk-plugin`，确认安装与首次授权。插件设置中管理账号；粘贴分享文本后选择文件，任务直接进入宿主下载队列。
 
-**当前夸克已完成一个真实样例的完整下载；百度仅登录与目录解析验收通过，取原文件仍受限。**
+**夸克已完成真实样例的手机完整下载；百度改为访客优先，但当前样例的原文件下载仍受限。** 详见 [0.1.2 对照与验收](docs/yunx-reference.md)。
 
 ## 支持范围
 
 | 平台 | 匿名列目录 | 获取原文件下载链接 | Android 插件 |
 | --- | --- | --- | --- |
-| 百度网盘 | 匿名与登录目录均已真机验证 | 需要登录；本轮真实取链仍失败，不能宣称下载通过 | 已接入，下载验证待完成 |
+| 百度网盘 | 匿名与登录目录均已真机验证 | 访客优先，受限时仅用已有账号重试一次；真实取链仍未通过 | 已接入，下载验证待完成 |
 | 夸克网盘 | 已实现 | 已完成一个匿名样例的手机完整下载，仍需要匿名会话 Cookie | 已接入 |
 | 阿里云盘 | 已实现，experimental | 需要阿里云盘账号 access_token，或账号 refresh_token 换取 | 未公开接入 |
 

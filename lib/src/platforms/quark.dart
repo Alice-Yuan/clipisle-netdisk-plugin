@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show HttpDate, HttpException;
 
 import '../errors.dart';
 import '../http/http_client.dart';
@@ -14,7 +15,21 @@ import 'parser.dart';
 ///
 /// 匿名响应下发的会话 Cookie 也必须用于下载；登录 Cookie 不保证解除平台限制。
 class QuarkParser extends NetdiskParser {
-  QuarkParser(super.http);
+  QuarkParser(super.http, {this.onCredentialUpdated});
+
+  /// 每次成功操作最多通知一次；仅更新已有登录会话的账号 Cookie。
+  CredentialUpdatedCallback? onCredentialUpdated;
+
+  Future<void> _publishCredentialUpdate(_QuarkSession session) async {
+    final updated = session.updatedCredential;
+    final callback = onCredentialUpdated;
+    if (updated == null || callback == null) return;
+    try {
+      await callback(platform, session.originalCredential, updated);
+    } catch (_) {
+      // Persistence is best effort; a valid download must remain usable.
+    }
+  }
 
   final _contexts =
       Expando<({String shareId, String token, _QuarkSession session})>();
@@ -183,6 +198,7 @@ class QuarkParser extends NetdiskParser {
     if (resolved.isEmpty) {
       throw err(NetdiskErrorCode.emptyShare, '分享目录为空');
     }
+    await _publishCredentialUpdate(session);
     return NetdiskShare(
       platform: platform,
       shareId: link.shareId,
@@ -288,7 +304,7 @@ class QuarkParser extends NetdiskParser {
         context.shareId == link.shareId &&
         context.session.initialCookie == (credential.cookie ?? '');
     final session =
-        reusable ? context.session.fork() : _QuarkSession(credential);
+        reusable ? context.session.fork(credential) : _QuarkSession(credential);
     final stoken = reusable ? context.token : await _stoken(link, session);
     var fidToken = file.extra['share_fid_token']?.toString();
     if (!reusable) {
@@ -347,6 +363,7 @@ class QuarkParser extends NetdiskParser {
       );
     }
 
+    await _publishCredentialUpdate(session);
     return NetdiskDownloadLink(
       platform: platform,
       url: url,
@@ -393,35 +410,115 @@ String decodeUtf8(List<int> bytes) => utf8.decode(bytes, allowMalformed: true);
 
 // Sessions are local to an operation, so concurrent users never share credentials.
 class _QuarkSession {
-  _QuarkSession(NetdiskCredential credential)
-      : initialCookie = credential.cookie ?? '' {
-    for (final part in (credential.cookie ?? '').split(';')) {
+  _QuarkSession(this.originalCredential)
+      : initialCookie = originalCredential.cookie ?? '' {
+    for (final part in initialCookie.split(';')) {
       final index = part.indexOf('=');
       if (index > 0) {
         _cookies[part.substring(0, index).trim()] =
             part.substring(index + 1).trim();
       }
     }
+    // Anonymous responses can contain account-shaped tokens. They must never
+    // create a persisted account or leak device/guest tokens into the store.
+    if ((_cookies['__puus'] ?? '').isNotEmpty) {
+      _accountCookies = Map.of(_cookies);
+    }
   }
 
+  final NetdiskCredential originalCredential;
   final String initialCookie;
   final Map<String, String> _cookies = {};
+  Map<String, String>? _accountCookies;
+  bool _accountChanged = false;
+  bool _accountCleared = false;
+  static const _accountCookieNames = {'__pus', '__puus', 'ctoken'};
 
-  _QuarkSession fork() {
-    final copy = _QuarkSession(NetdiskCredential(cookie: initialCookie));
-    copy._cookies.addAll(_cookies);
+  _QuarkSession fork(NetdiskCredential original) {
+    final copy = _QuarkSession(original);
+    copy._cookies
+      ..clear()
+      ..addAll(_cookies);
+    copy._accountCookies =
+        _accountCookies == null ? null : Map.of(_accountCookies!);
+    copy._accountCleared = _accountCleared;
+    // The new operation reports only changes it observes itself.
     return copy;
   }
 
   String get cookie =>
       _cookies.entries.map((e) => '${e.key}=${e.value}').join('; ');
-  NetdiskCredential get credential => NetdiskCredential(cookie: cookie);
+  NetdiskCredential get credential => originalCredential.withCookie(cookie);
+
+  NetdiskCredential? get updatedCredential {
+    final account = _accountCookies;
+    if (!_accountChanged || account == null) return null;
+    final previous = _QuarkSession(originalCredential)._cookies;
+    if (account.length == previous.length &&
+        account.entries.every((e) => previous[e.key] == e.value)) {
+      return null;
+    }
+    return originalCredential.withCookie(
+        account.entries.map((e) => '${e.key}=${e.value}').join('; '));
+  }
+
+  static bool _expiredCookie(String cookie) {
+    final age = RegExp(r'(?:^|;)\s*max-age\s*=\s*(-?\d+)\s*(?:;|$)',
+            caseSensitive: false)
+        .firstMatch(cookie);
+    // A valid Max-Age overrides Expires, including values too large for int.
+    if (age != null) return BigInt.parse(age.group(1)!) <= BigInt.zero;
+    final expires =
+        RegExp(r'(?:^|;)\s*expires\s*=\s*([^;]*)', caseSensitive: false)
+            .firstMatch(cookie);
+    if (expires == null) return false;
+    try {
+      return !HttpDate.parse(expires.group(1)!.trim())
+          .isAfter(DateTime.now().toUtc());
+    } on HttpException {
+      return false;
+    }
+  }
 
   void absorb(HttpResult response) {
-    // The anonymous API issues these cookies; the signed CDN URL requires them.
-    for (final name in ['__pugs', '__sdid', '__pus', '__puus', 'ctoken']) {
-      final value = response.setCookieValue(name);
-      if (value != null) _cookies[name] = value;
+    // Keep guest/device cookies in this operation only. Account persistence is
+    // a separate allowlist and starts only from an existing login credential.
+    final received = <String, String>{};
+    for (final header in response.headers.entries) {
+      if (header.key.toLowerCase() != 'set-cookie') continue;
+      for (final piece in header.value.split(RegExp(r',(?=\s*[^=;,\s]+=)'))) {
+        final parts = piece.split(';');
+        final index = parts.first.indexOf('=');
+        if (index <= 0) continue;
+        final name = parts.first.substring(0, index).trim();
+        if (!{'__pugs', '__sdid', ..._accountCookieNames}.contains(name)) {
+          continue;
+        }
+        received[name] = _expiredCookie(piece)
+            ? ''
+            : parts.first.substring(index + 1).trim();
+      }
+    }
+    // Once the server clears the login, later guest-issued tokens in this
+    // operation must not reconstruct it in persistent storage.
+    if (['__puus', '__pus']
+        .any((name) => received.containsKey(name) && received[name]!.isEmpty)) {
+      _accountCleared = true;
+    }
+    for (final entry in received.entries) {
+      if (entry.value.isEmpty) {
+        _cookies.remove(entry.key);
+      } else {
+        _cookies[entry.key] = entry.value;
+      }
+      final account = _accountCookies;
+      if (account == null || !_accountCookieNames.contains(entry.key)) continue;
+      if (entry.value.isEmpty) {
+        if (account.remove(entry.key) != null) _accountChanged = true;
+      } else if (!_accountCleared && account[entry.key] != entry.value) {
+        account[entry.key] = entry.value;
+        _accountChanged = true;
+      }
     }
   }
 }

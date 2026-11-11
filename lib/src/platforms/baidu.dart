@@ -116,13 +116,9 @@ class BaiduParser extends NetdiskParser {
     }
     if (code == 9019 || code == -20) {
       // "need verify" is not proof that a captured BDUSS has expired.
-      return err(
-          authenticated || code == -20
-              ? NetdiskErrorCode.verificationRequired
-              : NetdiskErrorCode.loginRequired,
+      return err(NetdiskErrorCode.verificationRequired,
           '百度要求完成账号或访问验证，请在官方网页验证或重新登录后重试',
-          status: status,
-          detail: detail);
+          status: status, detail: detail);
     }
     if (code == -6) {
       return err(
@@ -233,6 +229,19 @@ class BaiduParser extends NetdiskParser {
       ParsedShareLink link, NetdiskCredential credential) async {
     final headers = _headers(credential)
       ..['Referer'] = _base.resolve('s/${_fullSurl(link)}').toString();
+    // A saved browser Cookie may contain another share's validation key.
+    // Acquire BDCLND only from this share's init/verify requests.
+    final scopedCookies = (headers['Cookie'] ?? '')
+        .split(';')
+        .where((part) => part.trim().split('=').first != 'BDCLND')
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty)
+        .join('; ');
+    if (scopedCookies.isEmpty) {
+      headers.remove('Cookie');
+    } else {
+      headers['Cookie'] = scopedCookies;
+    }
     final surl = _fullSurl(link).substring(1);
     final res =
         await http.get(_url('share/init', {'surl': surl}), headers: headers);
@@ -406,10 +415,104 @@ class BaiduParser extends NetdiskParser {
   Future<_BaiduSession> _webSession(
       ParsedShareLink link, NetdiskCredential credential) async {
     final headers = await _prepareWeb(link, credential);
-    final data = await _page(link, headers);
+    Map<String, Object?> data;
+    try {
+      data = await _page(link, headers);
+    } on NetdiskException catch (error) {
+      // Only an unknown HTML layout gets one JSON context attempt. Explicit
+      // password, validation, expiry and HTTP errors retain their meaning.
+      if (error.code != NetdiskErrorCode.badResponse ||
+          error.statusCode != null ||
+          error.detail != 'stage=sharepage errno=unknown') {
+        rethrow;
+      }
+      data = await _xpanContext(link, headers);
+    }
     headers['Origin'] = 'https://pan.baidu.com';
     headers['X-Requested-With'] = 'XMLHttpRequest';
     return _BaiduSession(data, headers, false);
+  }
+
+  Future<Map<String, Object?>> _xpanContext(
+      ParsedShareLink link, Map<String, String> headers) async {
+    final encodedKey = _cookie(headers, 'BDCLND');
+    String? sekey;
+    if (encodedKey != null && encodedKey.isNotEmpty) {
+      try {
+        sekey = Uri.decodeComponent(encodedKey);
+      } on FormatException {
+        throw err(NetdiskErrorCode.badResponse, '分享会话密钥编码无效',
+            detail: 'stage=xpanshare errno=unknown');
+      }
+    }
+    final res = await http.get(
+        _url('rest/2.0/xpan/share', {
+          'method': 'list',
+          'shorturl': _fullSurl(link).substring(1),
+          'root': '1',
+          'dir': '/',
+          'page': '1',
+          'num': '100',
+          if (sekey != null && sekey.isNotEmpty) 'sekey': sekey,
+        }),
+        headers: headers);
+    final json = res.jsonMap;
+    if (res.status != 200 || json?['errno'] != 0) {
+      throw _apiError(json?['errno'], res.status,
+          stage: 'xpanshare',
+          authenticated: (_cookie(headers, 'BDUSS') ?? '').isNotEmpty);
+    }
+    final shareId = json?['share_id'];
+    final uk = json?['uk'];
+    bool numericId(Object? value) =>
+        (value is String || value is int) &&
+        RegExp(r'^[1-9][0-9]*$').hasMatch('$value');
+    if (!numericId(shareId) || !numericId(uk) || json?['list'] is! List) {
+      throw err(NetdiskErrorCode.badResponse, '分享 JSON 缺少有效的 share_id/uk/list',
+          status: res.status, detail: 'stage=xpanshare errno=0');
+    }
+    // The JSON context supplies share identity only. Obtain the signature from
+    // tplconfig in the same browser session; never reuse the WX signature.
+    return {'shareid': shareId, 'uk': uk};
+  }
+
+  Future<String> _webBdstoken(
+      NetdiskCredential credential, _BaiduSession session) async {
+    final tokens = [
+      credential.baiduBdstoken,
+      session.data['bdstoken'],
+      session.data['MYBDSTOKEN']
+    ];
+    final existing = tokens
+        .whereType<String>()
+        .firstWhere((token) => token.isNotEmpty, orElse: () => '');
+    if (existing.isNotEmpty ||
+        (credential.cookieValue('BDUSS') ?? '').isEmpty) {
+      return existing;
+    }
+    final res = await http.get(
+        _url('api/gettemplatevariable', {
+          'clienttype': '0',
+          'app_id': '250528',
+          'web': '1',
+          'fields': jsonEncode(['bdstoken']),
+        }),
+        headers: session.headers);
+    final json = res.jsonMap;
+    if (res.status != 200 || json?['errno'] != 0) {
+      throw _apiError(json?['errno'], res.status,
+          stage: 'bdstoken', authenticated: true);
+    }
+    final result = json?['result'];
+    final token = result is Map ? result['bdstoken'] : null;
+    if (token is! String ||
+        token.isEmpty ||
+        !RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(token)) {
+      throw err(NetdiskErrorCode.badResponse, '登录接口未返回有效的 bdstoken',
+          status: res.status, detail: 'stage=bdstoken errno=0');
+    }
+    session.data['bdstoken'] = token;
+    return token;
   }
 
   Future<List<NetdiskFile>> _walk(
@@ -537,25 +640,18 @@ class BaiduParser extends NetdiskParser {
     final (session, _) = await _load(link, credential);
     try {
       return await _resolveSession(link, file, credential, session);
-    } on NetdiskException catch (error, stack) {
+    } on NetdiskException catch (error) {
       final canUseWeb = session.wx &&
-          (credential.cookieValue('BDUSS') ?? '').isNotEmpty &&
           error.code == NetdiskErrorCode.verificationRequired &&
-          error.detail == 'stage=sharedownload errno=9019';
+          const {
+            'stage=tplconfig errno=9019',
+            'stage=sharedownload errno=9019',
+          }.contains(error.detail);
       if (!canUseWeb) rethrow;
-      // One official web-session attempt, never a recursive retry or captcha loop.
-      try {
-        final webSession = await _webSession(link, credential);
-        return await _resolveSession(link, file, credential, webSession);
-      } on NetdiskException catch (fallbackError) {
-        if (fallbackError.code == NetdiskErrorCode.badResponse &&
-            fallbackError.detail == 'stage=sharepage errno=unknown') {
-          // An unrecognized fallback page cannot disprove the provider's
-          // original explicit verification requirement.
-          Error.throwWithStackTrace(error, stack);
-        }
-        rethrow;
-      }
+      // One official web-session attempt, including anonymous sessions.
+      // Explicit provider errors stop here; no recursive retry or captcha loop.
+      final webSession = await _webSession(link, credential);
+      return await _resolveSession(link, file, credential, webSession);
     }
   }
 
@@ -576,6 +672,7 @@ class BaiduParser extends NetdiskParser {
         }
       }
     }
+    final bdstoken = session.wx ? '' : await _webBdstoken(credential, session);
     final res = await http.postForm(
         _url('api/sharedownload', {
           'sign': sign,
@@ -584,11 +681,7 @@ class BaiduParser extends NetdiskParser {
           'clienttype': session.wx ? '12' : '0',
           'web': '1',
           'app_id': '250528',
-          if (!session.wx)
-            'bdstoken': credential.baiduBdstoken ??
-                (session.data['bdstoken'] ?? session.data['MYBDSTOKEN'])
-                    ?.toString() ??
-                '',
+          if (bdstoken.isNotEmpty) 'bdstoken': bdstoken,
         }),
         fields: {
           'encrypt': '0',

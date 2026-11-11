@@ -16,9 +16,16 @@ class NetdiskClient {
   factory NetdiskClient({
     HttpClient? http,
     List<NetdiskParser>? parsers,
+    CredentialUpdatedCallback? onCredentialUpdated,
   }) {
     final transport = http ?? HttpClient();
-    return NetdiskClient._(transport, parsers ?? defaultParsers(transport));
+    final selected = parsers ?? defaultParsers(transport);
+    if (onCredentialUpdated != null) {
+      for (final parser in selected.whereType<QuarkParser>()) {
+        parser.onCredentialUpdated = onCredentialUpdated;
+      }
+    }
+    return NetdiskClient._(transport, selected);
   }
   NetdiskClient._(this.http, this.parsers);
   final _contexts = Expando<ParsedShareLink>();

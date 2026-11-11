@@ -284,4 +284,260 @@ void main() {
     addTearDown(client.close);
     expect(QuarkParser(client).match('https://evilquark.cn/s/fixture'), isNull);
   });
+
+  group('Quark account credential updates', () {
+    const original = NetdiskCredential(
+      cookie: 'custom=keep; __pus=old-pus; __puus=old-puus; ctoken=old-token',
+      accessToken: 'unrelated-access',
+      refreshToken: 'unrelated-refresh',
+      baiduBdstoken: 'unrelated-bdstoken',
+    );
+    const file = NetdiskFile(fileId: 'f', name: 'fixture.bin', size: 1);
+
+    NetdiskClient createClient({
+      Map<String, String> tokenHeaders = const {},
+      Map<String, String> listHeaders = const {},
+      Map<String, String> downloadHeaders = const {},
+      required CredentialUpdatedCallback callback,
+    }) {
+      final client = NetdiskClient(
+        onCredentialUpdated: callback,
+        http: HttpClient(client: MockClient((request) async {
+          if (request.url.path.endsWith('/token')) {
+            return reply({
+              'code': 0,
+              'data': {'stoken': 'fixture-token'}
+            }, headers: tokenHeaders);
+          }
+          if (request.method == 'GET') {
+            return reply({
+              'code': 0,
+              'data': {
+                'list': [entry('f')]
+              }
+            }, headers: listHeaders);
+          }
+          return reply({
+            'code': 0,
+            'data': [
+              {'download_url': 'https://dl.quark.cn/fixture'}
+            ]
+          }, headers: downloadHeaders);
+        })),
+      );
+      addTearDown(client.close);
+      return client;
+    }
+
+    test('anonymous tokens stay operation-local and never create an account',
+        () async {
+      var updates = 0;
+      final client = createClient(
+          tokenHeaders: {
+            'set-cookie': '__pugs=guest; Path=/'
+          },
+          downloadHeaders: {
+            'set-cookie': '__sdid=device; Path=/, __puus=guest-shaped; Path=/'
+          },
+          callback: (_, __, ___) {
+            updates++;
+          });
+      final direct = await client.resolveDownloadFrom(link, file);
+      expect(updates, 0);
+      expect(direct.headers['Cookie'], contains('__pugs=guest'));
+      expect(direct.headers['Cookie'], contains('__sdid=device'));
+      expect(direct.headers['Cookie'], contains('__puus=guest-shaped'));
+    });
+
+    test(
+        'successful parse emits one final allowlisted update with original before',
+        () async {
+      final changes = <(NetdiskCredential, NetdiskCredential)>[];
+      final client = createClient(
+          tokenHeaders: {
+            'set-cookie': '__puus=middle; Path=/, __pugs=guest; Path=/'
+          },
+          listHeaders: {
+            'set-cookie': '__puus=latest; Path=/, __pus=new-pus; Path=/, '
+                'ctoken=new-token; Path=/, __sdid=device; Path=/, custom=replace'
+          },
+          callback: (platform, before, after) async {
+            expect(platform, NetdiskPlatform.quark);
+            changes.add((before, after));
+          });
+      final share = await client.parseLink(link, credential: original);
+      expect(share.files, hasLength(1));
+      expect(changes, hasLength(1));
+      expect(identical(changes.single.$1, original), isTrue);
+      final after = changes.single.$2;
+      expect(after.cookieValue('__puus'), 'latest');
+      expect(after.cookieValue('__pus'), 'new-pus');
+      expect(after.cookieValue('ctoken'), 'new-token');
+      expect(after.cookieValue('custom'), 'keep');
+      expect(after.cookieValue('__pugs'), isNull);
+      expect(after.cookieValue('__sdid'), isNull);
+      expect(after.accessToken, original.accessToken);
+      expect(after.refreshToken, original.refreshToken);
+      expect(after.baiduBdstoken, original.baiduBdstoken);
+      // Reusing the parsed context without new response changes must not emit
+      // the parse update a second time merely because a fork inherited it.
+      await client.resolveDownload(share, share.files.single,
+          credential: original);
+      expect(changes, hasLength(1));
+    });
+
+    test('resolve publishes latest cookie and binds it to the returned URL',
+        () async {
+      final changes = <(NetdiskCredential, NetdiskCredential)>[];
+      final client = createClient(
+          tokenHeaders: {'set-cookie': '__puus=middle; Path=/'},
+          listHeaders: {'set-cookie': '__puus=listed; Path=/'},
+          downloadHeaders: {'set-cookie': '__puus=download; Path=/'},
+          callback: (_, before, after) {
+            changes.add((before, after));
+          });
+      final direct =
+          await client.resolveDownloadFrom(link, file, credential: original);
+      expect(changes, hasLength(1));
+      expect(identical(changes.single.$1, original), isTrue);
+      expect(changes.single.$2.cookieValue('__puus'), 'download');
+      expect(direct.headers['Cookie'], contains('__puus=download'));
+    });
+
+    test('unchanged account cookies and guest-only changes do not notify',
+        () async {
+      var updates = 0;
+      final client = createClient(
+          tokenHeaders: {
+            'set-cookie': '__puus=old-puus; Path=/, __pugs=guest; Path=/'
+          },
+          listHeaders: {
+            'set-cookie': '__sdid=device; Path=/'
+          },
+          callback: (_, __, ___) {
+            updates++;
+          });
+      await client.parseLink(link, credential: original);
+      await client.resolveDownloadFrom(link, file, credential: original);
+      expect(updates, 0);
+    });
+
+    for (final deletion in [
+      '__puus=; Path=/',
+      '__puus=deleted; Max-Age=0',
+      '__puus=deleted; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+      '__puus=deleted; Max-Age=0; Expires=Fri, 01 Jan 2100 00:00:00 GMT',
+      '__puus=deleted; Max-Age=invalid; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+      '__puus=deleted; Max-Age=0invalid; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+      '__pus=; Path=/',
+    ]) {
+      test('cleared login is not recreated by guest tokens: $deletion',
+          () async {
+        final changes = <NetdiskCredential>[];
+        final client = createClient(
+            tokenHeaders: {'set-cookie': deletion},
+            listHeaders: {'set-cookie': '__puus=guest-shaped; Path=/'},
+            callback: (_, before, after) {
+              expect(identical(before, original), isTrue);
+              changes.add(after);
+            });
+        await client.resolveDownloadFrom(link, file, credential: original);
+        expect(changes, hasLength(1));
+        expect(
+            changes.single.cookieValue(
+                deletion.startsWith('__pus=') ? '__pus' : '__puus'),
+            isNull);
+        expect(changes.single.cookieValue('__puus'), isNot('guest-shaped'));
+      });
+    }
+
+    for (final attributes in [
+      'Expires=Fri, 01 Jan 2100 00:00:00 GMT',
+      'Expires=invalid-date',
+      'Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+      'Max-Age=999999999999999999999999999999; '
+          'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+      'Max-Age=0invalid; Expires=Fri, 01 Jan 2100 00:00:00 GMT',
+    ]) {
+      test('cookie expiration retains a valid login: $attributes', () async {
+        final changes = <NetdiskCredential>[];
+        final client = createClient(
+            downloadHeaders: {
+              'set-cookie': '__puus=fresh; $attributes, __pugs=guest; Path=/'
+            },
+            callback: (_, __, after) {
+              changes.add(after);
+            });
+        final direct =
+            await client.resolveDownloadFrom(link, file, credential: original);
+        expect(changes, hasLength(1));
+        expect(changes.single.cookieValue('__puus'), 'fresh');
+        expect(changes.single.cookieValue('__pugs'), isNull);
+        expect(direct.headers['Cookie'], contains('__puus=fresh'));
+        expect(direct.headers['Cookie'], contains('__pugs=guest'));
+      });
+    }
+
+    for (final asynchronous in [false, true]) {
+      test('callback failure cannot invalidate download (async=$asynchronous)',
+          () async {
+        final client = createClient(
+            downloadHeaders: {'set-cookie': '__puus=new; Path=/'},
+            callback: (_, __, ___) {
+              if (asynchronous) return Future<void>.error(StateError('store'));
+              throw StateError('store');
+            });
+        final direct =
+            await client.resolveDownloadFrom(link, file, credential: original);
+        expect(direct.url, 'https://dl.quark.cn/fixture');
+        expect(direct.headers['Cookie'], contains('__puus=new'));
+      });
+    }
+
+    test('parallel forks keep distinct final updates and download headers',
+        () async {
+      final changes = <NetdiskCredential>[];
+      final client = NetdiskClient(onCredentialUpdated: (_, before, after) {
+        expect(identical(before, original), isTrue);
+        changes.add(after);
+      }, http: HttpClient(client: MockClient((request) async {
+        if (request.url.path.endsWith('/token')) {
+          return reply({
+            'code': 0,
+            'data': {'stoken': 'fixture'}
+          });
+        }
+        if (request.method == 'GET') {
+          return reply({
+            'code': 0,
+            'data': {
+              'list': [entry('a'), entry('b')]
+            }
+          });
+        }
+        final id = (jsonDecode(request.body)['fids'] as List).single;
+        if (id == 'a') await Future<void>.delayed(Duration.zero);
+        return reply({
+          'code': 0,
+          'data': [
+            {'download_url': 'https://dl.quark.cn/$id'}
+          ]
+        }, headers: {
+          'set-cookie': '__puus=for-$id; Path=/'
+        });
+      })));
+      addTearDown(client.close);
+      final share = await client.parseLink(link, credential: original);
+      final resolved = await client.resolveAll(link, share.files,
+          credential: original, concurrency: 2);
+      expect(changes, hasLength(2));
+      expect(changes.map((c) => c.cookieValue('__puus')).toSet(),
+          {'for-a', 'for-b'});
+      for (final result in resolved) {
+        expect(result.error, isNull);
+        expect(result.link!.headers['Cookie'],
+            contains('__puus=for-${result.file.fileId}'));
+      }
+    });
+  });
 }
